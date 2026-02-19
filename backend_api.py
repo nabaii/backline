@@ -1486,7 +1486,7 @@ def _resolve_team_anchor_match(
 
 
 def create_app() -> Flask:
-    app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
+    app = Flask(__name__)
 
     cors_origin = os.environ.get("CORS_ORIGIN", "*")
 
