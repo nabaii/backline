@@ -1344,13 +1344,17 @@ html {
     left: 0;
     right: 0;
     z-index: 200;
-    background: #111114;
-    border-top: 1px solid var(--border);
+    background: rgba(17, 17, 20, 0.85);
+    /* Semi-transparent */
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
-    padding: 6px 8px;
-    gap: 6px;
+    padding: 10px 12px;
+    gap: 10px;
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
   }
 
   .fixture-bottom-bar::-webkit-scrollbar {
@@ -1361,55 +1365,55 @@ html {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--border);
-    background: var(--surface);
+    gap: 8px;
+    padding: 8px 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.03);
     cursor: pointer;
-    transition: all var(--transition);
+    transition: all 0.2s ease;
     white-space: nowrap;
-    min-width: 120px;
+    min-width: 130px;
   }
 
   .fixture-bottom-card:hover {
-    border-color: var(--border-light);
-    background: var(--surface-alt);
+    background: rgba(255, 255, 255, 0.06);
   }
 
   .fixture-bottom-card.selected {
     border-color: var(--primary);
-    background: var(--primary-dim);
+    background: rgba(248, 198, 41, 0.12);
+    box-shadow: 0 0 10px rgba(248, 198, 41, 0.2);
   }
 
   .fixture-bottom-card-logo {
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     object-fit: contain;
-    border-radius: 50%;
     flex-shrink: 0;
   }
 
   .fixture-bottom-card-vs {
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     color: var(--text-secondary);
-    font-weight: 500;
+    font-weight: 600;
+    opacity: 0.6;
   }
 
   .fixture-bottom-card-name {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     font-weight: 500;
     color: var(--text);
-    max-width: 56px;
+    max-width: 60px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
   /* Add bottom padding so content isn't hidden behind the bottom bar */
   .workspace-pane {
-    padding-bottom: 62px;
+    padding-bottom: 80px;
   }
-  
+
   .kitchen-page {
     padding-left: 0;
     padding-right: 0;

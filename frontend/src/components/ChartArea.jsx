@@ -323,19 +323,40 @@ function computeBarSize(plotWidth, totalBars) {
   return Math.max(2, Math.min(40, rawBarSize))
 }
 
-function MatchAxisTick({ x, y, payload, data = [] }) {
+function MatchAxisTick({ x, y, payload, data = [], containerWidth = 1000 }) {
   const row = data[payload?.index]
   if (!row) return null
+
+  // Fluid scaling: 350px -> 12px logo, 700px -> 22px logo
+  const minWidth = 350
+  const maxWidth = 700
+  const minLogo = 12
+  const maxLogo = 22
+
+  const ratio = Math.max(0, Math.min(1, (containerWidth - minWidth) / (maxWidth - minWidth)))
+  const logoSize = minLogo + (ratio * (maxLogo - minLogo))
+
+  const logoOffset = logoSize / 2
+
+  // Font scaling: 9px -> 11px
+  const minFont = 9
+  const maxFont = 11
+  const fontSizeVal = minFont + (ratio * (maxFont - minFont))
+  const fontSize = `${fontSizeVal.toFixed(1)}px`
+
+  // Position scaling
+  const textY1 = 24 + (ratio * (36 - 24))
+  const textY2 = 33 + (ratio * (48 - 33))
 
   return (
     <g transform={`translate(${x},${y})`} className="chart-axis-tick">
       {row.opponent_logo ? (
-        <image href={row.opponent_logo} x={-11} y={0} width={22} height={22} />
+        <image href={row.opponent_logo} x={-logoOffset} y={0} width={logoSize} height={logoSize} />
       ) : (
-        <circle cx={0} cy={11} r={9} fill="#1a1a1f" stroke="#2a2a30" strokeWidth={1} />
+        <circle cx={0} cy={logoOffset} r={logoOffset - 1} fill="#1a1a1f" stroke="#2a2a30" strokeWidth={1} />
       )}
-      <text x={0} y={36} textAnchor="middle" className="chart-axis-date-month">{row.date_month || '--'}</text>
-      <text x={0} y={48} textAnchor="middle" className="chart-axis-date-day">{row.date_day || '--'}</text>
+      <text x={0} y={textY1} textAnchor="middle" style={{ fontSize, fill: '#9b9ca6' }} className="chart-axis-date-month">{row.date_month || '--'}</text>
+      <text x={0} y={textY2} textAnchor="middle" style={{ fontSize, fill: '#9b9ca6', fontWeight: 500 }} className="chart-axis-date-month">{row.date_day || '--'}</text>
     </g>
   )
 }
@@ -709,7 +730,7 @@ function TeamBarChart({
                 tickLine={false}
                 axisLine={false}
                 height={X_AXIS_HEIGHT}
-                tick={<MatchAxisTick data={data} />}
+                tick={<MatchAxisTick data={data} containerWidth={containerWidth} />}
                 padding={{ left: 20 }}
               />
               <YAxis
