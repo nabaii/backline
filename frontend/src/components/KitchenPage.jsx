@@ -1,9 +1,55 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { getLeagues, getFixturesForLeague } from '../api/backendApi'
+import { getTeamLogo } from '../utils/premierLeagueLogos'
 import LeagueSelector from './LeagueSelector'
 import FixtureList from './FixtureList'
 import BetTypeWorkspace from './BetTypeWorkspace'
 import WorkspaceLoadingPlaceholder from './WorkspaceLoadingPlaceholder'
+
+function FixtureBottomBar({ fixtures = [], selected, onSelect }) {
+  const barRef = useRef(null)
+
+  // Auto-scroll to selected card
+  useEffect(() => {
+    if (!barRef.current) return
+    const selectedCard = barRef.current.querySelector('.fixture-bottom-card.selected')
+    if (selectedCard) {
+      selectedCard.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+    }
+  }, [selected])
+
+  if (!fixtures.length) return null
+
+  return (
+    <div className="fixture-bottom-bar" ref={barRef}>
+      {fixtures.map(f => {
+        const homeLogo = getTeamLogo(f.home_team_name, f.home_team_id)
+        const awayLogo = getTeamLogo(f.away_team_name, f.away_team_id)
+        const shortHome = (f.home_team_name || '').split(' ').slice(-1)[0] || '?'
+        const shortAway = (f.away_team_name || '').split(' ').slice(-1)[0] || '?'
+
+        return (
+          <button
+            key={f.match_id}
+            type="button"
+            className={`fixture-bottom-card${selected === f.match_id ? ' selected' : ''}`}
+            onClick={() => onSelect(f.match_id)}
+          >
+            {homeLogo
+              ? <img src={homeLogo} alt={f.home_team_name} className="fixture-bottom-card-logo" />
+              : <span className="fixture-bottom-card-name">{shortHome}</span>
+            }
+            <span className="fixture-bottom-card-vs">@</span>
+            {awayLogo
+              ? <img src={awayLogo} alt={f.away_team_name} className="fixture-bottom-card-logo" />
+              : <span className="fixture-bottom-card-name">{shortAway}</span>
+            }
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 export default function KitchenPage() {
   const [leagues, setLeagues] = useState([])
@@ -44,7 +90,7 @@ export default function KitchenPage() {
             const nextFixtures = response.fixtures || []
             fixturesCacheRef.current.set(league.id, nextFixtures)
           })
-        ).catch(() => {})
+        ).catch(() => { })
 
         if (!firstLeague) {
           setIsLeagueLoading(false)
@@ -139,6 +185,9 @@ export default function KitchenPage() {
           ) : <div className="workspace-error">No match selected.</div>}
         </main>
       </div>
+
+      {/* Mobile fixture bottom bar */}
+      <FixtureBottomBar fixtures={fixtures} selected={selectedMatch} onSelect={setSelectedMatch} />
     </div>
   )
 }

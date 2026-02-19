@@ -1294,33 +1294,345 @@ html {
   }
 }
 
+/* ── Mobile (≤ 700px) ── */
 @media (max-width:700px) {
   :root {
-    --page-gutter: 12px;
+    --page-gutter: 0;
+    --header-height: 96px;
   }
 
+  /* ── Header ── */
   .kitchen-header {
     flex-direction: column;
     align-items: stretch;
-    gap: 8px;
-    padding: 14px 12px;
+    gap: 6px;
+    padding: 10px 12px;
   }
 
-  .league-select {
-    width: 100%;
+  .brand-block h1 {
+    font-size: 1.25rem;
+  }
+
+  .league-tabs {
+    gap: 4px;
+  }
+
+  .league-tab {
+    padding: 7px 12px;
+    font-size: 0.78rem;
+    gap: 4px;
+  }
+
+  .league-tab-logo {
+    width: 16px;
+    height: 16px;
+  }
+
+  .league-tab-name {
+    font-size: 0.75rem;
+  }
+
+  /* ── Hide desktop fixture sidebar, show bottom bar ── */
+  .fixtures-pane {
+    display: none;
+  }
+
+  .fixture-bottom-bar {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 200;
+    background: #111114;
+    border-top: 1px solid var(--border);
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding: 6px 8px;
+    gap: 6px;
+  }
+
+  .fixture-bottom-bar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .fixture-bottom-card {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+    transition: all var(--transition);
+    white-space: nowrap;
+    min-width: 120px;
+  }
+
+  .fixture-bottom-card:hover {
+    border-color: var(--border-light);
+    background: var(--surface-alt);
+  }
+
+  .fixture-bottom-card.selected {
+    border-color: var(--primary);
+    background: var(--primary-dim);
+  }
+
+  .fixture-bottom-card-logo {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .fixture-bottom-card-vs {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .fixture-bottom-card-name {
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--text);
+    max-width: 56px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Add bottom padding so content isn't hidden behind the bottom bar */
+  .workspace-pane {
+    padding-bottom: 62px;
+  }
+  
+  .kitchen-page {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  /* ── Bet Tabs ── */
+  .workspace-header {
+    padding: 0 8px;
+  }
+
+  .bettabs {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    flex-wrap: nowrap;
+  }
+
+  .bettabs::-webkit-scrollbar {
+    display: none;
   }
 
   .bettabs button {
     padding: 10px 10px;
     font-size: 0.75rem;
+    white-space: nowrap;
+    flex-shrink: 0;
   }
 
-  .fixture-item {
-    gap: 4px;
-    padding: 8px 6px;
+  /* ── Chart Area ── */
+  .chart-area {
+    padding: 8px;
   }
 
-  .fixture-team-name {
+  .pm-chart-canvas {
+    height: 260px;
+  }
+
+  .pm-chart-header {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .pm-logo,
+  .pm-logo-fallback {
+    width: 40px;
+    height: 40px;
+    font-size: 1rem;
+  }
+
+  .pm-team-name {
+    font-size: 0.88rem;
+  }
+
+  .pm-subtitle {
     font-size: 0.65rem;
   }
+
+  .pm-subtitle--line {
+    font-size: 0.78rem;
+  }
+
+  .pm-hit-rate-label {
+    font-size: 0.56rem;
+  }
+
+  .pm-hit-rate-value {
+    font-size: 1.25rem;
+  }
+
+  .pm-hit-rate-count {
+    font-size: 0.62rem;
+  }
+
+  .pm-metric-cell {
+    padding: 3px 10px;
+    min-width: 56px;
+  }
+
+  .pm-metric-label {
+    font-size: 0.55rem;
+  }
+
+  .pm-metric-value {
+    font-size: 0.92rem;
+  }
+
+  .pm-chart-body {
+    padding: 8px 4px;
+  }
+
+  .ou-line-paddle {
+    min-width: 36px;
+    height: 26px;
+    font-size: 0.85rem;
+    border-radius: 6px;
+    left: 4px;
+  }
+
+  .ou-line-paddle::after {
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 5px solid #f8c629;
+    right: -5px;
+  }
+
+  .chart-legend {
+    gap: 10px;
+    padding: 4px 0;
+    margin-top: 4px;
+  }
+
+  .chart-legend-item {
+    font-size: 0.65rem;
+  }
+
+  /* ── Filters ── */
+  .filters-toggle-btn {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 0.72rem;
+  }
+
+  .filter-dropdown {
+    padding: 10px 10px;
+  }
+
+  .filter-pill-btn {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 0.68rem;
+  }
+
+  .split-toggle-btn {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 0.68rem;
+  }
+
+  /* ── Metrics Panel ── */
+  .metrics-panel {
+    padding: 10px 12px;
+  }
+
+  .metrics-panel h4 {
+    font-size: 0.8rem;
+    margin-bottom: 6px;
+  }
+
+  .team-metrics {
+    gap: 8px;
+  }
+
+  .team-metrics>div {
+    padding: 8px;
+    font-size: 0.75rem;
+  }
+
+  .team-metrics>div strong {
+    font-size: 0.78rem;
+  }
+}
+
+/* ── Small phones (≤ 380px) ── */
+@media (max-width:380px) {
+  .brand-block h1 {
+    font-size: 1.1rem;
+  }
+
+  .league-tab {
+    padding: 6px 9px;
+    font-size: 0.72rem;
+  }
+
+  .league-tab-name {
+    display: none;
+  }
+
+  .bettabs button {
+    padding: 8px 7px;
+    font-size: 0.68rem;
+  }
+
+  .pm-logo,
+  .pm-logo-fallback {
+    width: 34px;
+    height: 34px;
+  }
+
+  .pm-team-name {
+    font-size: 0.8rem;
+  }
+
+  .pm-hit-rate-value {
+    font-size: 1.1rem;
+  }
+
+  .pm-metric-cell {
+    padding: 2px 8px;
+    min-width: 48px;
+  }
+
+  .team-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .fixture-bottom-card {
+    min-width: 100px;
+    padding: 5px 8px;
+    gap: 4px;
+  }
+
+  .fixture-bottom-card-logo {
+    width: 16px;
+    height: 16px;
+  }
+
+  .fixture-bottom-card-name {
+    font-size: 0.62rem;
+    max-width: 44px;
+  }
+}
+
+/* ── Bottom bar hidden on desktop ── */
+.fixture-bottom-bar {
+  display: none;
 }

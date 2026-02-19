@@ -28,6 +28,7 @@ const CORNERS_LINE_STEP = 0.5
 const Y_AXIS_STEP = 0.5
 const Y_AXIS_BASE_TICK_COUNT = 4
 const CHART_HEIGHT = 330
+const CHART_HEIGHT_MOBILE = 260
 const CHART_MARGIN = { top: 12, right: 10, left: -6, bottom: 44 }
 const X_AXIS_HEIGHT = 74
 
@@ -562,11 +563,14 @@ function TeamBarChart({
     ? getTeamLogo(firstRow.team_name, Number.isFinite(teamIdFromRaw) ? teamIdFromRaw : null, firstRow?._raw?.league_id)
     : null
 
+  const isMobileChart = containerWidth > 0 && containerWidth <= 700
+  const chartHeight = isMobileChart ? CHART_HEIGHT_MOBILE : CHART_HEIGHT
+
   const plotWidth = Math.max((containerWidth || 0) - 66, 100)
   const barCategoryGap = computeBarCategoryGap(data.length)
   const barSize = computeBarSize(plotWidth, data.length)
   const plotTop = CHART_MARGIN.top
-  const plotBottom = CHART_HEIGHT - CHART_MARGIN.bottom - X_AXIS_HEIGHT
+  const plotBottom = chartHeight - CHART_MARGIN.bottom - X_AXIS_HEIGHT
   const plotHeight = Math.max(1, plotBottom - plotTop)
   const lineRatio = yAxisMax > 0 ? clamp(line / yAxisMax, 0, 1) : 0
   const lineY = plotTop + ((1 - lineRatio) * plotHeight)
@@ -697,7 +701,7 @@ function TeamBarChart({
       {/* ── Bar chart ── */}
       <div className="pm-chart-body">
         <div className="pm-chart-canvas" ref={chartCanvasRef}>
-          <ResponsiveContainer width="100%" height={CHART_HEIGHT}>
+          <ResponsiveContainer width="100%" height={chartHeight}>
             <ComposedChart data={data} barCategoryGap={barCategoryGap} margin={CHART_MARGIN}>
               <XAxis
                 dataKey="label"

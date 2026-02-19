@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+
+# Notebooks & large scratch files
+*.ipynb
+data/raw/ignore.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

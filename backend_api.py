@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,7 @@ FIXTURE_CSV_PATH = DATA_DIR / "EPL_fixture.csv"
 SEASON_DATE_FALLBACK_PATH = DATA_DIR / "season_df.csv"
 PRIMARY_SEASON_DATA_PATH = DATA_DIR / "season_df.csv"
 LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
+FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 
 # ── Multi-league registry ──────────────────────────────────────────────────
 LEAGUE_REGISTRY: list[dict[str, str]] = [
@@ -252,8 +254,11 @@ def _sofascore_event_to_fixture_row(event: dict[str, Any], league_id: str) -> Fi
 
 
 def _resolve_sofascore_season_context(league_name: str, season_label: str) -> tuple[int, int] | None:
-    import ScraperFC as sfc
-    from ScraperFC.sofascore import comps
+    try:
+        import ScraperFC as sfc
+        from ScraperFC.sofascore import comps
+    except ImportError:
+        return None
 
     cache_key = f"{league_name}:{season_label}"
     cached = _sofascore_season_cache.get(cache_key)
@@ -296,8 +301,11 @@ def _fetch_sofascore_events(
     direction: str,
     max_pages: int = 1,
 ) -> list[dict[str, Any]]:
-    from ScraperFC.sofascore import API_PREFIX
-    from ScraperFC.utils import botasaurus_browser_get_json
+    try:
+        from ScraperFC.sofascore import API_PREFIX
+        from ScraperFC.utils import botasaurus_browser_get_json
+    except ImportError:
+        return []
 
     if direction not in {"last", "next"}:
         return []
@@ -1478,11 +1486,13 @@ def _resolve_team_anchor_match(
 
 
 def create_app() -> Flask:
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder=str(FRONTEND_DIST), static_url_path="")
+
+    cors_origin = os.environ.get("CORS_ORIGIN", "*")
 
     @app.after_request
     def add_cors_headers(response):
-        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Origin"] = cors_origin
         response.headers["Access-Control-Allow-Headers"] = "Content-Type"
         response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
         return response
@@ -2385,6 +2395,18 @@ def create_app() -> Flask:
         }
         return jsonify(response)
 
+    # ── Serve frontend SPA ──────────────────────────────────────────────
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def serve_frontend(path):
+        from flask import send_from_directory
+        if path and (FRONTEND_DIST / path).is_file():
+            return send_from_directory(str(FRONTEND_DIST), path)
+        index_path = FRONTEND_DIST / "index.html"
+        if index_path.is_file():
+            return send_from_directory(str(FRONTEND_DIST), "index.html")
+        return "Frontend not built. Run: cd frontend && npm install && npm run build", 404
+
     return app
 
 
@@ -2392,4 +2414,5 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
