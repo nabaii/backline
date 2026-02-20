@@ -902,6 +902,10 @@ html {
   display: none;
 }
 
+.metrics-panel-desktop-wrap {
+  display: block;
+}
+
 /* ── Filters Drawer ── */
 .filters-drawer {
   width: 0;
@@ -1574,6 +1578,22 @@ html {
     font-size: 0.65rem;
   }
 
+  .workspace-main {
+    order: 1;
+  }
+
+  .filters-drawer {
+    order: 2;
+  }
+
+  .metrics-panel-desktop-wrap {
+    display: none;
+  }
+
+  .metrics-panel-mobile-wrap {
+    display: block;
+    order: 3;
+  }
   /* ── Filters ── */
   .filters-toggle-btn {
     height: 28px;

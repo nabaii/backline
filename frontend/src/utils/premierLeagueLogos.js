@@ -43,17 +43,17 @@ const TEAM_LOGOS = {
   celtavigo: localLogoPath('la-liga', 'Celta%20de%20Vigo.svg'),
   elche: localLogoPath('la-liga', 'Elche.svg'),
   espanyol: localLogoPath('la-liga', 'Espanyol.svg'),
-  getafe: 'https://api.sofascore.app/api/v1/team/2859/image',
+  getafe: localLogoPath('la-liga', 'Getafe%20CF.svg'),
   girona: localLogoPath('la-liga', 'Girona.svg'),
   levante: localLogoPath('la-liga', 'Levante.svg'),
-  mallorca: 'https://api.sofascore.app/api/v1/team/2833/image',
+  mallorca: localLogoPath('la-liga', 'Mallorca.svg'),
   osasuna: localLogoPath('la-liga', 'Osasuna.svg'),
   rayovallecano: localLogoPath('la-liga', 'Rayo%20Vallecano.svg'),
   realbetis: localLogoPath('la-liga', 'Real%20Betis.svg'),
   realmadrid: localLogoPath('la-liga', 'Real%20Madrid.svg'),
   realoviedo: localLogoPath('la-liga', 'Real%20Oviedo.svg'),
   realsociedad: localLogoPath('la-liga', 'Real%20Sociedad.svg'),
-  sevilla: 'https://api.sofascore.app/api/v1/team/2816/image',
+  sevilla: localLogoPath('la-liga', 'Sevilla%20FC.svg'),
   valencia: localLogoPath('la-liga', 'Valencia%20CF.svg'),
   villarreal: localLogoPath('la-liga', 'Villarreal%20CF.svg'),
 
@@ -75,7 +75,7 @@ const TEAM_LOGOS = {
   stuttgart: localLogoPath('bundesliga', 'VFB%20Stuttgart.svg'),
   wolfsburg: localLogoPath('bundesliga', 'VfL%20Wolfsburg.svg'),
   werderbremen: localLogoPath('bundesliga', 'Werder.svg'),
-  gladbach: 'https://api.sofascore.app/api/v1/team/2527/image',
+  gladbach: localLogoPath('bundesliga', 'Borussia%20Monchengladbach.svg'),
   bochum: 'https://api.sofascore.app/api/v1/team/2538/image',
   hertha: 'https://api.sofascore.app/api/v1/team/2512/image',
   schalke: 'https://api.sofascore.app/api/v1/team/2528/image',
@@ -115,6 +115,7 @@ const TEAM_LOGOS = {
   olympiquelyonnais: localLogoPath('ligue-1', 'Olympique_Lyonnais-OJIZp0W43_brandlogos.net.svg'),
   olympiquedemarseille: localLogoPath('ligue-1', 'olympique-de-marseille-logo-brandlogos.net_hhg2rfa2f.svg'),
   parissaintgermain: localLogoPath('ligue-1', 'paris-saint-germain-logo-5B8D1w4P_brandlogos.net.svg'),
+  parisfc: localLogoPath('ligue-1', 'Paris%20FC.svg'),
   rcstrasbourg: localLogoPath('ligue-1', 'RC_Strasbourg_Alsace-O1z8c5aEq_brandlogos.net.svg'),
   rclens: localLogoPath('ligue-1', 'rc-lens-logo-25602qz3_brandlogos.net.svg'),
   stadebrestois: localLogoPath('ligue-1', 'Stade_Brestois_29-OMU9U6TjL_brandlogos.net.svg'),
@@ -239,6 +240,13 @@ const TEAM_ALIASES = {
   toulousefc: 'toulouse',
 }
 
+const LEAGUE_LOGO_LOCAL = {
+  england_premier_league: localLogoPath('pl', 'Premier%20League.svg'),
+  spain_la_liga: localLogoPath('la-liga', 'La%20Liga.svg'),
+  germany_bundesliga: localLogoPath('bundesliga', 'Bundesliga.svg'),
+  italy_serie_a: localLogoPath('serie-a', 'Seria%20A.svg'),
+}
+
 const LEAGUE_LOGO_MAP = {
   england_premier_league: 17,
   spain_la_liga: 8,
@@ -282,6 +290,9 @@ export function getPremierLeagueLogo(teamName) {
 }
 
 export function getLeagueLogo(leagueId) {
+  const localLogo = LEAGUE_LOGO_LOCAL[leagueId]
+  if (localLogo) return localLogo
+
   const tournamentId = LEAGUE_LOGO_MAP[leagueId]
   if (!tournamentId) return null
   return `https://api.sofascore.app/api/v1/unique-tournament/${tournamentId}/image`

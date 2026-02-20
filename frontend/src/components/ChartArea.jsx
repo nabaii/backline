@@ -438,6 +438,7 @@ function MatchAxisTick({ x, y, payload, data = [], containerWidth = 1000 }) {
 
   const index = payload?.index ?? 0
   const isPhoneSizedChart = effectiveWidth <= MOBILE_CHART_BREAKPOINT
+  const shouldShowTickIcon = !(isPhoneSizedChart && totalBars > 15)
   let shouldRenderDate = true
 
   if (isPhoneSizedChart) {
@@ -453,23 +454,29 @@ function MatchAxisTick({ x, y, payload, data = [], containerWidth = 1000 }) {
     shouldRenderDate = (index % showDateEvery) === 0 || isLastTick
   }
 
-  const logoSize = clamp(perTickWidth * 0.72, superCompactMode ? 8 : 10, 22)
+  const logoSize = shouldShowTickIcon
+    ? clamp(perTickWidth * 0.72, superCompactMode ? 8 : 10, 22)
+    : 0
   const logoOffset = logoSize / 2
 
   const fontPx = superCompactMode ? 6 : compactMode ? 7 : 9
   const fontSize = `${fontPx}px`
 
-  const textY1 = logoSize + (superCompactMode ? 7 : 9)
+  const textY1 = shouldShowTickIcon
+    ? logoSize + (superCompactMode ? 7 : 9)
+    : (superCompactMode ? 8 : 10)
   const textY2 = textY1 + (superCompactMode ? 7 : 8)
   const dayOnly = superCompactMode
 
   return (
     <g transform={`translate(${x},${y})`} className="chart-axis-tick">
-      {row.opponent_logo ? (
-        <image href={row.opponent_logo} x={-logoOffset} y={0} width={logoSize} height={logoSize} />
-      ) : (
-        <circle cx={0} cy={logoOffset} r={logoOffset - 1} fill="#1a1a1f" stroke="#2a2a30" strokeWidth={1} />
-      )}
+      {shouldShowTickIcon ? (
+        row.opponent_logo ? (
+          <image href={row.opponent_logo} x={-logoOffset} y={0} width={logoSize} height={logoSize} />
+        ) : (
+          <circle cx={0} cy={logoOffset} r={logoOffset - 1} fill="#1a1a1f" stroke="#2a2a30" strokeWidth={1} />
+        )
+      ) : null}
       {shouldRenderDate ? (
         <>
           {!dayOnly ? (
