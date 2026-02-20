@@ -2,12 +2,11 @@ services:
   - type: web
     name: backline-api
     runtime: python
-    buildCommand: |
-      pip install -r requirements.txt
-      cd frontend && npm install && npm run build
+    plan: free
+    buildCommand: pip install -r requirements.txt && npm --prefix frontend install && npm --prefix frontend run build
     startCommand: gunicorn backend.backend_api:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     envVars:
       - key: PYTHON_VERSION
-        value: "3.11"
+        value: "3.11.11"
       - key: NODE_VERSION
         value: "20"
