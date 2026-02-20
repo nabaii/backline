@@ -41,6 +41,13 @@ function createDefaultFilters() {
     team_possession_range: [0, 100],
     opposition_possession_range: [0, 100],
     field_tilt_range: [0, 1],
+    opponent_rank_xgd_range: [1, 20],
+    opponent_rank_xgf_range: [1, 20],
+    opponent_rank_xga_range: [1, 20],
+    opponent_rank_position_range: [1, 20],
+    opponent_rank_corners_range: [1, 20],
+    opponent_rank_momentum_range: [1, 20],
+    opponent_rank_possession_range: [1, 20],
     shot_xg_threshold: 0.3,
     shot_xg_min_shots: 0,
   }
@@ -392,12 +399,14 @@ export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
               onToggleFilters={() => setIsFiltersOpen(current => !current)}
               activeOverlayFilter={activeOverlayFilter}
             />
-            <MetricsPanel
-              betType={workspace?.workspace?.bet_type || betType}
-              metrics={workspace.metrics}
-              sampleSize={workspace.sample_size}
-              sampleSizes={workspace.sample_sizes}
-            />
+            <div className="metrics-panel-desktop-wrap">
+              <MetricsPanel
+                betType={workspace?.workspace?.bet_type || betType}
+                metrics={workspace.metrics}
+                sampleSize={workspace.sample_size}
+                sampleSizes={workspace.sample_sizes}
+              />
+            </div>
           </div>
         </div>
         <aside className={`filters-drawer ${isFiltersOpen ? 'open' : 'closed'}`}>
@@ -421,6 +430,14 @@ export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
             </>
           ) : null}
         </aside>
+        <div className="metrics-panel-mobile-wrap">
+          <MetricsPanel
+            betType={workspace?.workspace?.bet_type || betType}
+            metrics={workspace.metrics}
+            sampleSize={workspace.sample_size}
+            sampleSizes={workspace.sample_sizes}
+          />
+        </div>
       </div>
     </div>
   )

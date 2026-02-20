@@ -188,6 +188,8 @@ html {
   border-right: 1px solid var(--border);
   overflow-y: auto;
   max-height: calc(100vh - var(--header-height) - var(--content-gap));
+  position: relative;
+  z-index: 20;
 }
 
 .workspace-pane {
@@ -315,6 +317,78 @@ html {
 .fixture-view-more:hover {
   border-color: var(--border-light);
   color: var(--text);
+}
+
+.fixture-bottom-menu {
+  display: none;
+}
+
+.fixture-bottom-menu {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 320;
+  background: #111114;
+  border-top: 1px solid var(--border);
+  padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+  display: none;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.fixture-bottom-menu::-webkit-scrollbar {
+  display: none;
+}
+
+.fixture-bottom-menu-item {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  min-height: 38px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.fixture-bottom-menu-item:hover {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+.fixture-bottom-menu-item.selected {
+  border-color: var(--primary);
+  background: var(--primary-dim);
+  color: var(--primary);
+}
+
+.fixture-bottom-team {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fixture-bottom-logo {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.fixture-bottom-vs {
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 /* ── Workspace / BetType ── */
@@ -822,6 +896,10 @@ html {
 
 .metrics-hit-rate--negative {
   color: var(--danger);
+}
+
+.metrics-panel-mobile-wrap {
+  display: none;
 }
 
 /* ── Filters Drawer ── */
@@ -1337,81 +1415,48 @@ html {
     display: none;
   }
 
-  .fixture-bottom-bar {
-    display: flex;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 200;
-    background: rgba(17, 17, 20, 0.85);
-    /* Semi-transparent */
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding: 10px 12px;
-    gap: 10px;
-    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+  .mobile-fixtures-tab::before {
+    content: '≡';
+    margin-right: 6px;
+    color: var(--primary);
+    font-size: 0.9rem;
+    line-height: 1;
   }
 
-  .fixture-bottom-bar::-webkit-scrollbar {
-    display: none;
-  }
-
-  .fixture-bottom-card {
-    flex: 0 0 auto;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    background: rgba(255, 255, 255, 0.03);
-    cursor: pointer;
-    transition: all 0.2s ease;
-    white-space: nowrap;
-    min-width: 130px;
-  }
-
-  .fixture-bottom-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  .fixture-bottom-card.selected {
+  .mobile-fixtures-tab:hover,
+  .mobile-fixtures-tab.open {
+    color: var(--text);
     border-color: var(--primary);
     background: rgba(248, 198, 41, 0.12);
-    box-shadow: 0 0 10px rgba(248, 198, 41, 0.2);
   }
 
-  .fixture-bottom-card-logo {
-    width: 24px;
-    height: 24px;
-    object-fit: contain;
-    flex-shrink: 0;
+  .mobile-fixtures-backdrop {
+    display: block;
+    position: fixed;
+    inset: var(--header-height) 0 0 0;
+    z-index: 250;
+    border: none;
+    margin: 0;
+    padding: 0;
+    background: rgba(6, 7, 10, 0);
+    pointer-events: none;
+    transition: background 180ms ease;
   }
 
-  .fixture-bottom-card-vs {
-    font-size: 0.7rem;
-    color: var(--text-secondary);
-    font-weight: 600;
-    opacity: 0.6;
+  .mobile-fixtures-backdrop.open {
+    background: rgba(6, 7, 10, 0.5);
+    pointer-events: auto;
   }
 
-  .fixture-bottom-card-name {
-    font-size: 0.75rem;
-    font-weight: 500;
-    color: var(--text);
-    max-width: 60px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* Add bottom padding so content isn't hidden behind the bottom bar */
   .workspace-pane {
-    padding-bottom: 80px;
+    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+    max-width: 430px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  .fixture-bottom-menu {
+    display: flex;
   }
 
   .kitchen-page {
@@ -1444,7 +1489,7 @@ html {
 
   /* ── Chart Area ── */
   .chart-area {
-    padding: 8px;
+    padding: 8px 6px;
   }
 
   .pm-chart-canvas {
@@ -1619,24 +1664,10 @@ html {
     grid-template-columns: 1fr;
   }
 
-  .fixture-bottom-card {
-    min-width: 100px;
-    padding: 5px 8px;
-    gap: 4px;
+  .mobile-fixtures-tab {
+    top: calc(var(--header-height) + 12px);
+    height: 34px;
+    font-size: 0.68rem;
+    padding: 0 10px 0 8px;
   }
-
-  .fixture-bottom-card-logo {
-    width: 16px;
-    height: 16px;
-  }
-
-  .fixture-bottom-card-name {
-    font-size: 0.62rem;
-    max-width: 44px;
-  }
-}
-
-/* ── Bottom bar hidden on desktop ── */
-.fixture-bottom-bar {
-  display: none;
 }

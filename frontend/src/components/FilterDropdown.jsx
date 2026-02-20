@@ -3,6 +3,10 @@ import React, { useEffect, useState, useCallback } from 'react'
 const VIEW_BOTH = 'both'
 const VIEW_HOME = 'home'
 const VIEW_AWAY = 'away'
+const CATEGORY_SUGGESTED = 'suggested'
+const CATEGORY_SPLIT = 'split'
+const CATEGORY_STATS = 'stats'
+const CATEGORY_OPPONENT_RANKINGS = 'opponent_rankings'
 
 const RANGE_CONFIGS = {
   team_momentum_range: { label: 'Momentum', min: 0, max: 10, step: 0.1, precision: 1 },
@@ -17,7 +21,33 @@ const RANGE_CONFIGS = {
   field_tilt_range: { label: 'Field Tilt', min: 0, max: 1, step: 0.01, precision: 2 },
 }
 
-const FILTER_KEYS = Object.keys(RANGE_CONFIGS)
+const OPPONENT_RANKING_RANGE_CONFIGS = {
+  opponent_rank_xgd_range: { label: 'Opp Rank xGD', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_xgf_range: { label: 'Opp Rank xGF', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_xga_range: { label: 'Opp Rank xGA', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_position_range: { label: 'Opp Rank Position', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_corners_range: { label: 'Opp Rank Corners', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_momentum_range: { label: 'Opp Rank Momentum', min: 1, max: 20, step: 1, precision: 0 },
+  opponent_rank_possession_range: { label: 'Opp Rank Poss', min: 1, max: 20, step: 1, precision: 0 },
+}
+
+const FILTER_KEYS = [...Object.keys(RANGE_CONFIGS), ...Object.keys(OPPONENT_RANKING_RANGE_CONFIGS)]
+const STATS_FILTER_KEYS = [
+  'team_momentum_range',
+  'opponent_momentum_range',
+  'total_match_goals_range',
+  'opposition_goals_range',
+  'team_xg_range',
+  'opposition_xg_range',
+  'team_possession_range',
+  'opposition_possession_range',
+  'field_tilt_range',
+]
+const OPPONENT_RANKING_FILTER_KEYS = Object.keys(OPPONENT_RANKING_RANGE_CONFIGS)
+
+function getRangeConfig(key) {
+  return RANGE_CONFIGS[key] || OPPONENT_RANKING_RANGE_CONFIGS[key] || null
+}
 
 function defaultRangeFor(config) {
   return [config.min, config.max]
@@ -117,12 +147,15 @@ export default function FilterDropdown({
 
   // Track which filter pills are expanded (show slider)
   const [expandedFilters, setExpandedFilters] = useState(new Set())
+  const [activeCategory, setActiveCategory] = useState(CATEGORY_SUGGESTED)
 
   // Draft states for each range filter
   const [drafts, setDrafts] = useState(() => {
     const d = {}
     for (const key of FILTER_KEYS) {
-      d[key] = normalizeRange(value[key], RANGE_CONFIGS[key])
+      const config = getRangeConfig(key)
+      if (!config) continue
+      d[key] = normalizeRange(value[key], config)
     }
     return d
   })
@@ -132,7 +165,9 @@ export default function FilterDropdown({
     setDrafts(prev => {
       const next = { ...prev }
       for (const key of FILTER_KEYS) {
-        const norm = normalizeRange(value[key], RANGE_CONFIGS[key])
+        const config = getRangeConfig(key)
+        if (!config) continue
+        const norm = normalizeRange(value[key], config)
         if (prev[key]?.[0] !== norm[0] || prev[key]?.[1] !== norm[1]) {
           next[key] = norm
         }
@@ -151,8 +186,12 @@ export default function FilterDropdown({
       }
       return next
     })
-    // Also set this as the active overlay filter
-    if (typeof onOverlayFilterChange === 'function') {
+    // Stats and opponent ranking filters are valid overlay candidates.
+    const isOverlayCandidate = (
+      Object.prototype.hasOwnProperty.call(RANGE_CONFIGS, key)
+      || Object.prototype.hasOwnProperty.call(OPPONENT_RANKING_RANGE_CONFIGS, key)
+    )
+    if (typeof onOverlayFilterChange === 'function' && isOverlayCandidate) {
       if (activeOverlayFilter === key) {
         onOverlayFilterChange(null)
       } else {
@@ -166,7 +205,7 @@ export default function FilterDropdown({
   }
 
   const commitRange = (key, committedRange) => {
-    const config = RANGE_CONFIGS[key]
+    const config = getRangeConfig(key)
     if (!config) return
     const normalized = normalizeRange(committedRange, config)
     const current = normalizeRange(value[key], config)
@@ -185,127 +224,174 @@ export default function FilterDropdown({
     <div className="filter-dropdown">
       {/* Category tabs */}
       <div className="filter-category-tabs">
-        <button type="button" className="filter-category-tab active">Suggested</button>
-        <button type="button" className="filter-category-tab">Splits</button>
-        <button type="button" className="filter-category-tab">Stats</button>
+        <button
+          type="button"
+          className={`filter-category-tab ${activeCategory === CATEGORY_SUGGESTED ? 'active' : ''}`}
+          onClick={() => setActiveCategory(CATEGORY_SUGGESTED)}
+        >
+          Suggested
+        </button>
+        <button
+          type="button"
+          className={`filter-category-tab ${activeCategory === CATEGORY_SPLIT ? 'active' : ''}`}
+          onClick={() => setActiveCategory(CATEGORY_SPLIT)}
+        >
+          Split
+        </button>
+        <button
+          type="button"
+          className={`filter-category-tab ${activeCategory === CATEGORY_STATS ? 'active' : ''}`}
+          onClick={() => setActiveCategory(CATEGORY_STATS)}
+        >
+          Stats
+        </button>
+        <button
+          type="button"
+          className={`filter-category-tab ${activeCategory === CATEGORY_OPPONENT_RANKINGS ? 'active' : ''}`}
+          onClick={() => setActiveCategory(CATEGORY_OPPONENT_RANKINGS)}
+        >
+          Opponent Rankings
+        </button>
       </div>
 
-      {/* Split view toggle */}
-      {typeof onSplitViewChange === 'function' ? (
-        <div className="filter-control">
-          <label>Chart View</label>
-          <div className="split-toggle">
-            <button
-              type="button"
-              className={`split-toggle-btn ${splitView === VIEW_BOTH ? 'active' : ''}`}
-              onClick={() => onSplitViewChange(VIEW_BOTH)}
-            >
-              Both
-            </button>
-            <button
-              type="button"
-              className={`split-toggle-btn ${splitView === VIEW_HOME ? 'active' : ''}`}
-              onClick={() => onSplitViewChange(VIEW_HOME)}
-            >
-              Home
-            </button>
-            <button
-              type="button"
-              className={`split-toggle-btn ${splitView === VIEW_AWAY ? 'active' : ''}`}
-              onClick={() => onSplitViewChange(VIEW_AWAY)}
-            >
-              Away
-            </button>
+      {activeCategory === CATEGORY_SUGGESTED || activeCategory === CATEGORY_SPLIT ? (
+        <>
+          {/* Split view toggle */}
+          {typeof onSplitViewChange === 'function' ? (
+            <div className="filter-control">
+              <label>Chart View</label>
+              <div className="split-toggle">
+                <button
+                  type="button"
+                  className={`split-toggle-btn ${splitView === VIEW_BOTH ? 'active' : ''}`}
+                  onClick={() => onSplitViewChange(VIEW_BOTH)}
+                >
+                  Both
+                </button>
+                <button
+                  type="button"
+                  className={`split-toggle-btn ${splitView === VIEW_HOME ? 'active' : ''}`}
+                  onClick={() => onSplitViewChange(VIEW_HOME)}
+                >
+                  Home
+                </button>
+                <button
+                  type="button"
+                  className={`split-toggle-btn ${splitView === VIEW_AWAY ? 'active' : ''}`}
+                  onClick={() => onSplitViewChange(VIEW_AWAY)}
+                >
+                  Away
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {/* Venue filter */}
+          <div className="filter-control">
+            <label>Venue</label>
+            <select value={value.home_away || 'all'} onChange={e => update('home_away', e.target.value)}>
+              <option value="all">All</option>
+              <option value="home">Home</option>
+              <option value="away">Away</option>
+            </select>
           </div>
-        </div>
+        </>
       ) : null}
 
-      {/* Venue filter */}
-      <div className="filter-control">
-        <label>Venue</label>
-        <select value={value.home_away || 'all'} onChange={e => update('home_away', e.target.value)}>
-          <option value="all">All</option>
-          <option value="home">Home</option>
-          <option value="away">Away</option>
-        </select>
-      </div>
-
-      {/* Filter pill buttons */}
-      <div className="filter-pills-grid">
-        {FILTER_KEYS.map(key => {
-          const config = RANGE_CONFIGS[key]
-          const isExpanded = expandedFilters.has(key)
-          const isModified = isRangeModified(value[key], config)
-          const isOverlay = activeOverlayFilter === key
-          let className = 'filter-pill-btn'
-          if (isExpanded || isOverlay) className += ' active'
-          if (isModified) className += ' modified'
-          return (
-            <button
-              key={key}
-              type="button"
-              className={className}
-              onClick={() => toggleFilter(key)}
-            >
-              {config.label}
-            </button>
-          )
-        })}
-      </div>
-
-      {/* Expandable sliders for active pills */}
-      {FILTER_KEYS.map(key => {
-        const config = RANGE_CONFIGS[key]
-        const isExpanded = expandedFilters.has(key)
-        const draft = drafts[key] || defaultRangeFor(config)
-        return (
-          <div key={key} className={`filter-slider-section ${isExpanded ? 'expanded' : ''}`}>
-            <div className="filter-slider-label">{config.label}</div>
-            <DualRangeSlider
-              range={draft}
-              config={config}
-              onDraftChange={(next) => updateDraft(key, next)}
-              onCommit={(next) => commitRange(key, next)}
-            />
-            <div className="filter-slider-values">
-              <span>{draft[0].toFixed(config.precision)}</span>
-              <span>{draft[1].toFixed(config.precision)}</span>
-            </div>
+      {activeCategory === CATEGORY_SUGGESTED || activeCategory === CATEGORY_STATS || activeCategory === CATEGORY_OPPONENT_RANKINGS ? (
+        <>
+          {/* Filter pill buttons */}
+          <div className="filter-pills-grid">
+            {(activeCategory === CATEGORY_SUGGESTED
+              ? FILTER_KEYS
+              : activeCategory === CATEGORY_STATS
+                ? STATS_FILTER_KEYS
+                : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+              const config = getRangeConfig(key)
+              if (!config) return null
+              const isExpanded = expandedFilters.has(key)
+              const isModified = isRangeModified(value[key], config)
+              const isOverlay = activeOverlayFilter === key
+              let className = 'filter-pill-btn'
+              if (isExpanded || isOverlay) className += ' active'
+              if (isModified) className += ' modified'
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className={className}
+                  onClick={() => toggleFilter(key)}
+                >
+                  {config.label}
+                </button>
+              )
+            })}
           </div>
-        )
-      })}
 
-      {/* Shot xG controls */}
-      <div className="filter-control" style={{ marginTop: 4 }}>
-        <label>Shot xG Threshold</label>
-        <input
-          type="number"
-          min={0}
-          max={2}
-          step={0.01}
-          value={shotXgThreshold}
-          onChange={(event) => {
-            const next = Number(event.target.value)
-            update('shot_xg_threshold', Number.isFinite(next) ? next : 0)
-          }}
-        />
-      </div>
+          {/* Expandable sliders for active pills */}
+          {(activeCategory === CATEGORY_SUGGESTED
+            ? FILTER_KEYS
+            : activeCategory === CATEGORY_STATS
+              ? STATS_FILTER_KEYS
+              : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+            const config = getRangeConfig(key)
+            if (!config) return null
+            const isExpanded = expandedFilters.has(key)
+            const draft = drafts[key] || defaultRangeFor(config)
+            return (
+              <div key={key} className={`filter-slider-section ${isExpanded ? 'expanded' : ''}`}>
+                <div className="filter-slider-label">{config.label}</div>
+                <DualRangeSlider
+                  range={draft}
+                  config={config}
+                  onDraftChange={(next) => updateDraft(key, next)}
+                  onCommit={(next) => commitRange(key, next)}
+                />
+                <div className="filter-slider-values">
+                  <span>{draft[0].toFixed(config.precision)}</span>
+                  <span>{draft[1].toFixed(config.precision)}</span>
+                </div>
+              </div>
+            )
+          })}
 
-      <div className="filter-control">
-        <label>Min Shots At/Above Threshold</label>
-        <input
-          type="number"
-          min={0}
-          max={30}
-          step={1}
-          value={shotXgMinShots}
-          onChange={(event) => {
-            const next = Number(event.target.value)
-            const safe = Number.isFinite(next) ? next : 0
-            update('shot_xg_min_shots', Math.max(0, Math.floor(safe)))
-          }}
-        />
-      </div>
+          {/* Shot xG controls */}
+          {activeCategory !== CATEGORY_OPPONENT_RANKINGS ? (
+            <>
+              <div className="filter-control" style={{ marginTop: 4 }}>
+                <label>Shot xG Threshold</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.01}
+                  value={shotXgThreshold}
+                  onChange={(event) => {
+                    const next = Number(event.target.value)
+                    update('shot_xg_threshold', Number.isFinite(next) ? next : 0)
+                  }}
+                />
+              </div>
+
+              <div className="filter-control">
+                <label>Min Shots At/Above Threshold</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  step={1}
+                  value={shotXgMinShots}
+                  onChange={(event) => {
+                    const next = Number(event.target.value)
+                    const safe = Number.isFinite(next) ? next : 0
+                    update('shot_xg_min_shots', Math.max(0, Math.floor(safe)))
+                  }}
+                />
+              </div>
+            </>
+          ) : null}
+        </>
+      ) : null}
 
       {/* Actions */}
       <div className="filter-actions">

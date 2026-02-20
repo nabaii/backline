@@ -631,6 +631,61 @@ def _build_league_table_from_season_df(season_df):
     df["game_winner"] = pd.to_numeric(df["game_winner"], errors="coerce")
     df = df.dropna(subset=["home_team", "away_team", "home_normaltime", "away_normaltime", "game_winner"])
 
+    def _numeric_series(column_name, default=np.nan):
+        if column_name in df.columns:
+            return pd.to_numeric(df[column_name], errors="coerce")
+        return pd.Series(default, index=df.index, dtype="float64")
+
+    def _shot_payload_xg_components(column_name: str):
+        if column_name not in df.columns:
+            return (
+                pd.Series(np.nan, index=df.index, dtype="float64"),
+                pd.Series(False, index=df.index, dtype="bool"),
+            )
+
+        values = []
+        valid_flags = []
+        for raw in df[column_name].tolist():
+            payload = None
+            if isinstance(raw, dict):
+                payload = raw
+            elif isinstance(raw, str):
+                text = raw.strip()
+                if text:
+                    try:
+                        payload = json.loads(text)
+                    except Exception:
+                        payload = None
+
+            if not isinstance(payload, dict) or not isinstance(payload.get("xg"), list):
+                values.append(np.nan)
+                valid_flags.append(False)
+                continue
+
+            total = 0.0
+            for shot_xg in payload.get("xg", []):
+                try:
+                    total += float(shot_xg)
+                except (TypeError, ValueError):
+                    continue
+            values.append(total)
+            valid_flags.append(True)
+
+        return (
+            pd.Series(values, index=df.index, dtype="float64"),
+            pd.Series(valid_flags, index=df.index, dtype="bool"),
+        )
+
+    expected_goals_home = _numeric_series("expected_goals_home")
+    expected_goals_away = _numeric_series("expected_goals_away")
+    home_shot_xg, home_shot_valid = _shot_payload_xg_components("home_shots")
+    away_shot_xg, away_shot_valid = _shot_payload_xg_components("away_shots")
+
+    team_xg_home = expected_goals_home.copy()
+    team_xg_away = expected_goals_away.copy()
+    team_xg_home.loc[home_shot_valid] = home_shot_xg.loc[home_shot_valid]
+    team_xg_away.loc[away_shot_valid] = away_shot_xg.loc[away_shot_valid]
+
     home_rows = pd.DataFrame(
         {
             "team": df["home_team"],
@@ -639,6 +694,12 @@ def _build_league_table_from_season_df(season_df):
             "lost": (df["game_winner"] == 2).astype(int),
             "goals_for": df["home_normaltime"].astype(int),
             "goals_against": df["away_normaltime"].astype(int),
+            "average_corners": _numeric_series("corner_kicks_home", default=0.0),
+            "average_possession": _numeric_series("ball_possession_home"),
+            "expected_goals_for": team_xg_home,
+            "expected_goals_against": team_xg_away,
+            "momentum": _numeric_series("home_momentum"),
+            "expected_goal_difference": team_xg_home - team_xg_away,
         }
     )
     away_rows = pd.DataFrame(
@@ -649,6 +710,12 @@ def _build_league_table_from_season_df(season_df):
             "lost": (df["game_winner"] == 1).astype(int),
             "goals_for": df["away_normaltime"].astype(int),
             "goals_against": df["home_normaltime"].astype(int),
+            "average_corners": _numeric_series("corner_kicks_away", default=0.0),
+            "average_possession": _numeric_series("ball_possession_away"),
+            "expected_goals_for": team_xg_away,
+            "expected_goals_against": team_xg_home,
+            "momentum": _numeric_series("away_momentum"),
+            "expected_goal_difference": team_xg_away - team_xg_home,
         }
     )
 
@@ -661,11 +728,30 @@ def _build_league_table_from_season_df(season_df):
             lost=("lost", "sum"),
             goals_for=("goals_for", "sum"),
             goals_against=("goals_against", "sum"),
+            average_corners=("average_corners", "mean"),
+            average_possession=("average_possession", "mean"),
+            expected_goals_for=("expected_goals_for", "sum"),
+            expected_goals_against=("expected_goals_against", "sum"),
+            momentum=("momentum", "mean"),
+            expected_goal_difference=("expected_goal_difference", "sum"),
         )
     )
+    table["goals_for"] = table["goals_for"].astype(int)
+    table["goals_against"] = table["goals_against"].astype(int)
     table["played"] = table["won"] + table["drawn"] + table["lost"]
     table["points"] = table["won"] * 3 + table["drawn"]
     table["goal_difference"] = table["goals_for"] - table["goals_against"]
+
+    for col in (
+        "average_corners",
+        "average_possession",
+        "expected_goals_for",
+        "expected_goals_against",
+        "momentum",
+        "expected_goal_difference",
+    ):
+        table[col] = pd.to_numeric(table[col], errors="coerce").fillna(0.0).round(2)
+
     table = table.sort_values(
         by=["points", "goal_difference", "goals_for", "team"],
         ascending=[False, False, False, True],
@@ -673,7 +759,24 @@ def _build_league_table_from_season_df(season_df):
     ).reset_index(drop=True)
     table["rank"] = table.index + 1
     table = table[
-        ["rank", "team", "played", "won", "drawn", "lost", "goals_for", "goals_against", "points", "goal_difference"]
+        [
+            "rank",
+            "team",
+            "played",
+            "won",
+            "drawn",
+            "lost",
+            "goals_for",
+            "goals_against",
+            "points",
+            "goal_difference",
+            "average_corners",
+            "average_possession",
+            "expected_goals_for",
+            "expected_goals_against",
+            "momentum",
+            "expected_goal_difference",
+        ]
     ]
     return table
 
@@ -693,6 +796,12 @@ def _build_multi_league_table_from_season_df(season_df):
                 "goals_against",
                 "points",
                 "goal_difference",
+                "average_corners",
+                "average_possession",
+                "expected_goals_for",
+                "expected_goals_against",
+                "momentum",
+                "expected_goal_difference",
             ]
         )
 

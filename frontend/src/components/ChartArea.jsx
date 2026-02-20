@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import {
-  ComposedChart, Bar, XAxis, YAxis, Tooltip,
+  ComposedChart, Bar, XAxis, YAxis, Tooltip, Line,
   ResponsiveContainer, ReferenceLine, Cell
 } from 'recharts'
 import {
@@ -29,21 +29,36 @@ const Y_AXIS_STEP = 0.5
 const Y_AXIS_BASE_TICK_COUNT = 4
 const CHART_HEIGHT = 330
 const CHART_HEIGHT_MOBILE = 260
-const CHART_MARGIN = { top: 12, right: 10, left: -6, bottom: 44 }
+const CHART_MARGIN_DESKTOP = { top: 12, right: 10, left: 4, bottom: 44 }
+const CHART_MARGIN_MOBILE = { top: 12, right: 8, left: 2, bottom: 44 }
 const X_AXIS_HEIGHT = 74
+const X_AXIS_PADDING_DESKTOP = 14
+const X_AXIS_PADDING_MOBILE = 8
+const Y_AXIS_WIDTH_DESKTOP = 34
+const Y_AXIS_WIDTH_MOBILE = 26
+const RIGHT_Y_AXIS_WIDTH_DESKTOP = 34
+const RIGHT_Y_AXIS_WIDTH_MOBILE = 26
+const MOBILE_CHART_BREAKPOINT = 700
 
 // Map filter keys to the match data fields we can overlay
 const OVERLAY_FIELD_MAP = {
-  team_momentum_range: { field: 'home_momentum', label: 'Momentum', color: '#4aa3df' },
-  opponent_momentum_range: { field: 'away_momentum', label: 'Opp Momentum', color: '#9b59b6' },
-  total_match_goals_range: { field: 'total_goals', label: 'Total Goals', color: '#e67e22' },
-  team_goals_range: { field: 'goals_scored', label: 'Goals', color: '#2ecc71' },
-  opposition_goals_range: { field: 'opponent_goals', label: 'Opp Goals', color: '#e74c3c' },
-  team_xg_range: { field: 'team_xg', label: 'xG', color: '#1abc9c' },
-  opposition_xg_range: { field: 'opponent_xg', label: 'Opp xG', color: '#e74c3c' },
-  team_possession_range: { field: 'ball_possession_home', label: 'Possession', color: '#3498db' },
-  opposition_possession_range: { field: 'ball_possession_away', label: 'Opp Poss', color: '#e74c3c' },
-  field_tilt_range: { field: 'field_tilt_home', label: 'Field Tilt', color: '#f39c12' },
+  team_momentum_range: { field: 'team_momentum_range', label: 'Momentum', color: '#2d6bff' },
+  opponent_momentum_range: { field: 'opponent_momentum_range', label: 'Opp Momentum', color: '#2d6bff' },
+  total_match_goals_range: { field: 'total_match_goals_range', label: 'Total Goals', color: '#2d6bff' },
+  team_goals_range: { field: 'team_goals_range', label: 'Goals', color: '#2d6bff' },
+  opposition_goals_range: { field: 'opposition_goals_range', label: 'Opp Goals', color: '#2d6bff' },
+  team_xg_range: { field: 'team_xg', label: 'xG', color: '#2d6bff' },
+  opposition_xg_range: { field: 'opponent_xg', label: 'Opp xG', color: '#2d6bff' },
+  team_possession_range: { field: 'team_possession_range', label: 'Possession', color: '#2d6bff' },
+  opposition_possession_range: { field: 'opposition_possession_range', label: 'Opp Poss', color: '#2d6bff' },
+  field_tilt_range: { field: 'field_tilt_range', label: 'Field Tilt', color: '#2d6bff' },
+  opponent_rank_xgd_range: { field: 'opponent_rank_xgd_range', label: 'Opp Rank xGD', color: '#2d6bff' },
+  opponent_rank_xgf_range: { field: 'opponent_rank_xgf_range', label: 'Opp Rank xGF', color: '#2d6bff' },
+  opponent_rank_xga_range: { field: 'opponent_rank_xga_range', label: 'Opp Rank xGA', color: '#2d6bff' },
+  opponent_rank_position_range: { field: 'opponent_rank_position_range', label: 'Opp Rank Position', color: '#2d6bff' },
+  opponent_rank_corners_range: { field: 'opponent_rank_corners_range', label: 'Opp Rank Corners', color: '#2d6bff' },
+  opponent_rank_momentum_range: { field: 'opponent_rank_momentum_range', label: 'Opp Rank Momentum', color: '#2d6bff' },
+  opponent_rank_possession_range: { field: 'opponent_rank_possession_range', label: 'Opp Rank Poss', color: '#2d6bff' },
 }
 
 function normalizeLineValue(rawValue) {
@@ -188,17 +203,42 @@ function buildOverUnderBars(matches = [], line = 2.5, betType = BET_TYPE_OVER_UN
   })
 }
 
+function getTotalCornersValue(row = {}) {
+  const directTotal = Number(row.total_corners ?? row._raw?.total_corners)
+  if (Number.isFinite(directTotal)) return directTotal
+
+  const homeCorners = Number(
+    row.home_corners
+      ?? row._raw?.home_corners
+      ?? row.corners_home
+      ?? row._raw?.corners_home
+      ?? row.corner_kicks_home
+      ?? row._raw?.corner_kicks_home
+      ?? 0
+  )
+  const awayCorners = Number(
+    row.away_corners
+      ?? row._raw?.away_corners
+      ?? row.corners_away
+      ?? row._raw?.corners_away
+      ?? row.corner_kicks_away
+      ?? row._raw?.corner_kicks_away
+      ?? 0
+  )
+  const safeHome = Number.isFinite(homeCorners) ? homeCorners : 0
+  const safeAway = Number.isFinite(awayCorners) ? awayCorners : 0
+  return safeHome + safeAway
+}
+
 function buildCornerBars(matches = [], line = 8.5) {
   return matches.map((m, idx) => {
-    const rawCorners = Number(m.total_corners ?? 0)
-    const safeCorners = Number.isFinite(rawCorners) ? rawCorners : 0
-    const plottedCorners = safeCorners === 0 ? 0.1 : safeCorners
+    const safeCorners = getTotalCornersValue(m)
     const fallbackOpponent = `Opponent ${m.opponent_id ?? idx + 1}`
     const label = m.chart_label || (m.venue === 'away' ? `@ ${m.opponent_name || fallbackOpponent}` : `vs ${m.opponent_name || fallbackOpponent}`)
     const result = safeCorners > line ? 'O' : 'U'
     return {
       label,
-      value: plottedCorners,
+      value: safeCorners,
       total_corners: safeCorners,
       color: result === 'O' ? '#2ecc71' : '#e74c3c',
       corners_over_under_result: result,
@@ -323,30 +363,105 @@ function computeBarSize(plotWidth, totalBars) {
   return Math.max(2, Math.min(40, rawBarSize))
 }
 
+function buildOverlayYAxisScale(data = []) {
+  const values = data
+    .map(row => Number(row?.overlayValue))
+    .filter(value => Number.isFinite(value))
+  if (!values.length) return null
+
+  const rawMin = Math.min(...values)
+  const rawMax = Math.max(...values)
+
+  let axisMin = rawMin
+  let axisMax = rawMax
+  if (Math.abs(rawMax - rawMin) < 1e-6) {
+    const pad = Math.max(1, Math.abs(rawMax) * 0.2)
+    axisMin = rawMin - pad
+    axisMax = rawMax + pad
+  } else {
+    const pad = (rawMax - rawMin) * 0.15
+    axisMin = rawMin - pad
+    axisMax = rawMax + pad
+  }
+
+  if (values.every(value => value >= 0)) {
+    axisMin = Math.max(0, axisMin)
+  }
+
+  const safeMin = roundAxisValue(axisMin)
+  const safeMax = roundAxisValue(Math.max(axisMax, safeMin + 0.1))
+  const tickCount = 4
+  const ticks = []
+  for (let idx = 0; idx < tickCount; idx++) {
+    const ratio = tickCount === 1 ? 0 : idx / (tickCount - 1)
+    ticks.push(roundAxisValue(safeMin + ((safeMax - safeMin) * ratio)))
+  }
+
+  return {
+    min: safeMin,
+    max: safeMax,
+    ticks: Array.from(new Set(ticks)).sort((a, b) => a - b),
+  }
+}
+
+function buildVisibleTickIndexSet(totalBars, containerWidth) {
+  const safeBars = Math.max(1, Number(totalBars) || 1)
+  if (safeBars <= 1) return new Set([0])
+
+  const safeWidth = Math.max(1, Number(containerWidth) || 1)
+  const maxLabelsByWidth = clamp(Math.floor(safeWidth / 72), 4, 8)
+  const targetLabels = Math.min(safeBars, maxLabelsByWidth)
+
+  if (safeBars <= targetLabels) {
+    return new Set(Array.from({ length: safeBars }, (_, idx) => idx))
+  }
+
+  const indexSet = new Set([0, safeBars - 1])
+  const denominator = Math.max(targetLabels - 1, 1)
+  for (let i = 0; i < targetLabels; i++) {
+    const ratio = i / denominator
+    const index = Math.round(ratio * (safeBars - 1))
+    indexSet.add(clamp(index, 0, safeBars - 1))
+  }
+  return indexSet
+}
+
 function MatchAxisTick({ x, y, payload, data = [], containerWidth = 1000 }) {
   const row = data[payload?.index]
   if (!row) return null
 
-  // Fluid scaling: 350px -> 12px logo, 700px -> 22px logo
-  const minWidth = 350
-  const maxWidth = 700
-  const minLogo = 12
-  const maxLogo = 22
+  const totalBars = Math.max(1, data.length)
+  const effectiveWidth = Math.max(1, containerWidth)
+  const perTickWidth = effectiveWidth / totalBars
+  const compactMode = perTickWidth < 14
+  const superCompactMode = perTickWidth < 11
 
-  const ratio = Math.max(0, Math.min(1, (containerWidth - minWidth) / (maxWidth - minWidth)))
-  const logoSize = minLogo + (ratio * (maxLogo - minLogo))
+  const index = payload?.index ?? 0
+  const isPhoneSizedChart = effectiveWidth <= MOBILE_CHART_BREAKPOINT
+  let shouldRenderDate = true
 
+  if (isPhoneSizedChart) {
+    const visibleTickIndexSet = buildVisibleTickIndexSet(totalBars, effectiveWidth)
+    shouldRenderDate = visibleTickIndexSet.has(index)
+  } else {
+    let showDateEvery = 1
+    if (perTickWidth < 10) showDateEvery = 4
+    else if (perTickWidth < 12) showDateEvery = 3
+    else if (perTickWidth < 16) showDateEvery = 2
+
+    const isLastTick = index === totalBars - 1
+    shouldRenderDate = (index % showDateEvery) === 0 || isLastTick
+  }
+
+  const logoSize = clamp(perTickWidth * 0.72, superCompactMode ? 8 : 10, 22)
   const logoOffset = logoSize / 2
 
-  // Font scaling: 9px -> 11px
-  const minFont = 9
-  const maxFont = 11
-  const fontSizeVal = minFont + (ratio * (maxFont - minFont))
-  const fontSize = `${fontSizeVal.toFixed(1)}px`
+  const fontPx = superCompactMode ? 6 : compactMode ? 7 : 9
+  const fontSize = `${fontPx}px`
 
-  // Position scaling
-  const textY1 = 24 + (ratio * (36 - 24))
-  const textY2 = 33 + (ratio * (48 - 33))
+  const textY1 = logoSize + (superCompactMode ? 7 : 9)
+  const textY2 = textY1 + (superCompactMode ? 7 : 8)
+  const dayOnly = superCompactMode
 
   return (
     <g transform={`translate(${x},${y})`} className="chart-axis-tick">
@@ -355,8 +470,24 @@ function MatchAxisTick({ x, y, payload, data = [], containerWidth = 1000 }) {
       ) : (
         <circle cx={0} cy={logoOffset} r={logoOffset - 1} fill="#1a1a1f" stroke="#2a2a30" strokeWidth={1} />
       )}
-      <text x={0} y={textY1} textAnchor="middle" style={{ fontSize, fill: '#9b9ca6' }} className="chart-axis-date-month">{row.date_month || '--'}</text>
-      <text x={0} y={textY2} textAnchor="middle" style={{ fontSize, fill: '#9b9ca6', fontWeight: 500 }} className="chart-axis-date-month">{row.date_day || '--'}</text>
+      {shouldRenderDate ? (
+        <>
+          {!dayOnly ? (
+            <text x={0} y={textY1} textAnchor="middle" style={{ fontSize, fill: '#9b9ca6' }} className="chart-axis-date-month">
+              {row.date_month || '--'}
+            </text>
+          ) : null}
+          <text
+            x={0}
+            y={dayOnly ? textY1 : textY2}
+            textAnchor="middle"
+            style={{ fontSize, fill: '#9b9ca6', fontWeight: 500 }}
+            className="chart-axis-date-day"
+          >
+            {row.date_day || '--'}
+          </text>
+        </>
+      ) : null}
     </g>
   )
 }
@@ -390,11 +521,14 @@ function getHitRateToneClass(percent) {
   return ''
 }
 
-function computeGraphAvg(rows) {
+function computeGraphAvg(rows, betType) {
+  const normalizedBetType = String(betType).toLowerCase()
   let sum = 0
   let count = 0
   for (const row of rows) {
-    const value = Number(row?.value)
+    const value = isCornersBetType(normalizedBetType)
+      ? getTotalCornersValue(row)
+      : Number(row?.value)
     if (Number.isFinite(value)) {
       sum += value
       count++
@@ -419,7 +553,7 @@ function computeSeasonAvg(rows, betType) {
           : (row.total_goals ?? row._raw?.total_goals)
       )
     } else if (isCornersBetType(normalizedBetType)) {
-      value = Number(row.total_corners ?? row._raw?.total_corners)
+      value = getTotalCornersValue(row)
     } else {
       value = Number(row.value)
     }
@@ -481,10 +615,25 @@ function enrichWithOverlay(data, overlayConfig) {
   if (!overlayConfig) return data
   return data.map(row => {
     const raw = row._raw || {}
-    const val = Number(raw[overlayConfig.field])
+    const directValue = Number(raw[overlayConfig.field])
+    let fallbackValue = null
+    if (!Number.isFinite(directValue) && (overlayConfig.field === 'team_xg' || overlayConfig.field === 'opponent_xg')) {
+      const homeXg = Number(raw.expected_goals_home)
+      const awayXg = Number(raw.expected_goals_away)
+      const venue = String(row?.venue || raw?.venue || '').toLowerCase()
+      if (Number.isFinite(homeXg) && Number.isFinite(awayXg)) {
+        if (overlayConfig.field === 'team_xg') {
+          fallbackValue = venue === 'away' ? awayXg : homeXg
+        } else {
+          fallbackValue = venue === 'away' ? homeXg : awayXg
+        }
+      }
+    }
     return {
       ...row,
-      overlayValue: Number.isFinite(val) ? val : null,
+      overlayValue: Number.isFinite(directValue)
+        ? directValue
+        : (Number.isFinite(fallbackValue) ? fallbackValue : null),
     }
   })
 }
@@ -569,11 +718,14 @@ function TeamBarChart({
   })
   const hitRate = computeHitRate(data, normalizedBetType)
   const hitRateToneClass = getHitRateToneClass(hitRate.percent)
-  const graphAvg = computeGraphAvg(data)
+  const graphAvg = computeGraphAvg(data, normalizedBetType)
   const seasonAvg = computeSeasonAvg(data, normalizedBetType)
   const averageMetricLabel = getAverageMetricLabel(normalizedBetType)
   const lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
   const hasLineSummaryLabel = Boolean(lineSummaryLabel)
+  const hasOverlay = Boolean(overlayConfig && data.some(d => d.overlayValue != null))
+  const overlayAvg = hasOverlay ? computeOverlayAvg(data) : null
+  const overlayScale = hasOverlay ? buildOverlayYAxisScale(data) : null
   const firstRow = data[0] || null
   const teamIdFromRaw = Number(
     firstRow?.venue === 'home'
@@ -584,20 +736,38 @@ function TeamBarChart({
     ? getTeamLogo(firstRow.team_name, Number.isFinite(teamIdFromRaw) ? teamIdFromRaw : null, firstRow?._raw?.league_id)
     : null
 
-  const isMobileChart = containerWidth > 0 && containerWidth <= 700
+  const isMobileChart = containerWidth > 0 && containerWidth <= MOBILE_CHART_BREAKPOINT
   const chartHeight = isMobileChart ? CHART_HEIGHT_MOBILE : CHART_HEIGHT
+  const chartMargin = isMobileChart ? CHART_MARGIN_MOBILE : CHART_MARGIN_DESKTOP
+  const xAxisPadding = isMobileChart ? X_AXIS_PADDING_MOBILE : X_AXIS_PADDING_DESKTOP
+  const yAxisWidth = isMobileChart ? Y_AXIS_WIDTH_MOBILE : Y_AXIS_WIDTH_DESKTOP
+  const rightYAxisWidth = hasOverlay ? (isMobileChart ? RIGHT_Y_AXIS_WIDTH_MOBILE : RIGHT_Y_AXIS_WIDTH_DESKTOP) : 0
+  const yAxisTickStyle = {
+    fill: '#9b9ca6',
+    fontSize: isMobileChart ? 12 : 13,
+    fontFamily: 'Aldrich, sans-serif',
+    textAnchor: 'end',
+    dx: isMobileChart ? -4 : -2,
+    dy: -6,
+  }
+  const rightYAxisTickStyle = {
+    fill: '#8a90a2',
+    fontSize: isMobileChart ? 10 : 11,
+    fontFamily: 'Aldrich, sans-serif',
+    textAnchor: 'start',
+    dx: isMobileChart ? 2 : 3,
+    dy: -4,
+  }
+  const linePaddleLeft = isMobileChart ? 0 : 8
 
-  const plotWidth = Math.max((containerWidth || 0) - 66, 100)
+  const plotWidth = Math.max((containerWidth || 0) - (yAxisWidth + rightYAxisWidth + (xAxisPadding * 2)), 100)
   const barCategoryGap = computeBarCategoryGap(data.length)
   const barSize = computeBarSize(plotWidth, data.length)
-  const plotTop = CHART_MARGIN.top
-  const plotBottom = chartHeight - CHART_MARGIN.bottom - X_AXIS_HEIGHT
+  const plotTop = chartMargin.top
+  const plotBottom = chartHeight - chartMargin.bottom - X_AXIS_HEIGHT
   const plotHeight = Math.max(1, plotBottom - plotTop)
   const lineRatio = yAxisMax > 0 ? clamp(line / yAxisMax, 0, 1) : 0
   const lineY = plotTop + ((1 - lineRatio) * plotHeight)
-
-  const hasOverlay = overlayConfig && data.some(d => d.overlayValue != null)
-  const overlayAvg = hasOverlay ? computeOverlayAvg(data) : null
 
   const teardownDragListeners = useCallback(() => {
     const listeners = dragListenersRef.current
@@ -723,7 +893,7 @@ function TeamBarChart({
       <div className="pm-chart-body">
         <div className="pm-chart-canvas" ref={chartCanvasRef}>
           <ResponsiveContainer width="100%" height={chartHeight}>
-            <ComposedChart data={data} barCategoryGap={barCategoryGap} margin={CHART_MARGIN}>
+            <ComposedChart data={data} barCategoryGap={barCategoryGap} margin={chartMargin}>
               <XAxis
                 dataKey="label"
                 interval={0}
@@ -731,7 +901,7 @@ function TeamBarChart({
                 axisLine={false}
                 height={X_AXIS_HEIGHT}
                 tick={<MatchAxisTick data={data} containerWidth={containerWidth} />}
-                padding={{ left: 20 }}
+                padding={{ left: xAxisPadding, right: xAxisPadding }}
               />
               <YAxis
                 yAxisId="left"
@@ -742,21 +912,40 @@ function TeamBarChart({
                 tickFormatter={yAxisTickFormatter}
                 tickLine={false}
                 axisLine={false}
-                tick={{ fill: '#9b9ca6', fontSize: 13, fontFamily: 'Aldrich, sans-serif', textAnchor: 'end', dy: -6 }}
+                width={yAxisWidth}
+                tickMargin={2}
+                tick={yAxisTickStyle}
               />
+              {hasOverlay && overlayScale ? (
+                <YAxis
+                  yAxisId="right"
+                  orientation="right"
+                  domain={[overlayScale.min, overlayScale.max]}
+                  ticks={overlayScale.ticks}
+                  interval={0}
+                  allowDecimals
+                  tickFormatter={formatYAxisTick}
+                  tickLine={false}
+                  axisLine={false}
+                  width={rightYAxisWidth}
+                  tickMargin={2}
+                  tick={rightYAxisTickStyle}
+                />
+              ) : null}
               <Tooltip
                 cursor={{ fill: 'rgba(255, 255, 255, 0.04)' }}
                 contentStyle={{ background: '#111114', borderColor: '#2a2a30', borderRadius: 10, color: '#edeef2', fontSize: '0.8rem' }}
                 formatter={(val, name, item) => {
                   if (name === 'overlayValue' && overlayConfig) {
-                    return [Number(val).toFixed(2), overlayConfig.label]
+                    return [formatYAxisTick(val), overlayConfig.label]
                   }
                   const metricName = item?.payload?.goals_metric_name
                   if (isOverUnder) {
                     return [Number(val).toFixed(1), metricName || 'Goals']
                   }
                   if (isCorners) {
-                    return [Number(val).toFixed(1), 'Total Corners']
+                    const totalCorners = getTotalCornersValue(item?.payload || {})
+                    return [Number(totalCorners).toFixed(1), 'Total Corners']
                   }
                   if (isBtts) {
                     return [Number(val).toFixed(1), 'BTTS']
@@ -775,7 +964,7 @@ function TeamBarChart({
                     return `${row.fixture_display} | ${row.date_label} | ${metricLabel} ${Number(metricValue).toFixed(1)} | ${row.over_under_result}`
                   }
                   if (isCorners) {
-                    return `${row.fixture_display} | ${row.date_label} | Total Corners ${Number(row.total_corners ?? 0).toFixed(1)}`
+                    return `${row.fixture_display} | ${row.date_label} | Total Corners ${getTotalCornersValue(row).toFixed(1)}`
                   }
                   if (isDoubleChance) {
                     return `${row.fixture_display} | ${row.date_label} | ${row.result || ''} | ${row.double_chance_result === 'H' ? 'Hit' : 'Miss'}`
@@ -792,6 +981,19 @@ function TeamBarChart({
                   <Cell key={`${entry.match_id}-${entry.label}-${entry.venue}`} fill={entry.color} />
                 ))}
               </Bar>
+              {hasOverlay && overlayScale ? (
+                <Line
+                  yAxisId="right"
+                  type="linear"
+                  dataKey="overlayValue"
+                  stroke={overlayConfig?.color || '#2d6bff'}
+                  strokeWidth={2.2}
+                  dot={false}
+                  connectNulls
+                  activeDot={{ r: 3, strokeWidth: 0, fill: overlayConfig?.color || '#2d6bff' }}
+                  isAnimationActive={false}
+                />
+              ) : null}
               {isLineType ? (
                 <ReferenceLine
                   yAxisId="left"
@@ -810,7 +1012,7 @@ function TeamBarChart({
             <button
               type="button"
               className="ou-line-paddle"
-              style={{ top: `${lineY}px` }}
+              style={{ top: `${lineY}px`, left: `${linePaddleLeft}px` }}
               onPointerDown={handlePaddlePointerDown}
               aria-label={`${isCorners ? 'Corners' : 'Over under'} line ${line.toFixed(1)}. Drag to adjust.`}
             >
@@ -826,6 +1028,12 @@ function TeamBarChart({
           <div className="chart-legend-item">
             <div className="chart-legend-swatch" style={{ background: '#f8c629' }} />
             <span>{isCorners ? 'Corners Line' : 'O/U Line'}</span>
+          </div>
+        ) : null}
+        {hasOverlay ? (
+          <div className="chart-legend-item">
+            <div className="chart-legend-swatch" style={{ background: overlayConfig?.color || '#2d6bff' }} />
+            <span>{overlayConfig?.label || 'Overlay'}</span>
           </div>
         ) : null}
       </div>

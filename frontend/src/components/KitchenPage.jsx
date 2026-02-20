@@ -6,48 +6,46 @@ import FixtureList from './FixtureList'
 import BetTypeWorkspace from './BetTypeWorkspace'
 import WorkspaceLoadingPlaceholder from './WorkspaceLoadingPlaceholder'
 
-function FixtureBottomBar({ fixtures = [], selected, onSelect }) {
-  const barRef = useRef(null)
+function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
+  const menuRef = useRef(null)
 
-  // Auto-scroll to selected card
   useEffect(() => {
-    if (!barRef.current) return
-    const selectedCard = barRef.current.querySelector('.fixture-bottom-card.selected')
-    if (selectedCard) {
-      selectedCard.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+    if (!menuRef.current) return
+    const selectedItem = menuRef.current.querySelector('.fixture-bottom-menu-item.selected')
+    if (selectedItem) {
+      selectedItem.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
     }
   }, [selected])
 
   if (!fixtures.length) return null
 
   return (
-    <div className="fixture-bottom-bar" ref={barRef}>
-      {fixtures.map(f => {
-        const homeLogo = getTeamLogo(f.home_team_name, f.home_team_id)
-        const awayLogo = getTeamLogo(f.away_team_name, f.away_team_id)
-        const shortHome = (f.home_team_name || '').split(' ').slice(-1)[0] || '?'
-        const shortAway = (f.away_team_name || '').split(' ').slice(-1)[0] || '?'
-
+    <nav className="fixture-bottom-menu" ref={menuRef} aria-label="Fixtures">
+      {fixtures.map((fixture) => {
+        const homeLogo = getTeamLogo(fixture.home_team_name, fixture.home_team_id)
+        const awayLogo = getTeamLogo(fixture.away_team_name, fixture.away_team_id)
+        const homeShort = (fixture.home_team_name || '').split(' ').slice(-1)[0] || '?'
+        const awayShort = (fixture.away_team_name || '').split(' ').slice(-1)[0] || '?'
         return (
           <button
-            key={f.match_id}
+            key={fixture.match_id}
             type="button"
-            className={`fixture-bottom-card${selected === f.match_id ? ' selected' : ''}`}
-            onClick={() => onSelect(f.match_id)}
+            className={`fixture-bottom-menu-item ${selected === fixture.match_id ? 'selected' : ''}`}
+            onClick={() => onSelect(fixture.match_id)}
           >
-            {homeLogo
-              ? <img src={homeLogo} alt={f.home_team_name} className="fixture-bottom-card-logo" />
-              : <span className="fixture-bottom-card-name">{shortHome}</span>
-            }
-            <span className="fixture-bottom-card-vs">@</span>
-            {awayLogo
-              ? <img src={awayLogo} alt={f.away_team_name} className="fixture-bottom-card-logo" />
-              : <span className="fixture-bottom-card-name">{shortAway}</span>
-            }
+            <span className="fixture-bottom-team">
+              {homeLogo ? <img src={homeLogo} alt={fixture.home_team_name} className="fixture-bottom-logo" /> : null}
+              <span>{homeShort}</span>
+            </span>
+            <span className="fixture-bottom-vs">vs</span>
+            <span className="fixture-bottom-team">
+              {awayLogo ? <img src={awayLogo} alt={fixture.away_team_name} className="fixture-bottom-logo" /> : null}
+              <span>{awayShort}</span>
+            </span>
           </button>
         )
       })}
-    </div>
+    </nav>
   )
 }
 
@@ -186,8 +184,7 @@ export default function KitchenPage() {
         </main>
       </div>
 
-      {/* Mobile fixture bottom bar */}
-      <FixtureBottomBar fixtures={fixtures} selected={selectedMatch} onSelect={setSelectedMatch} />
+      <FixtureBottomMenu fixtures={fixtures} selected={selectedMatch} onSelect={setSelectedMatch} />
     </div>
   )
 }

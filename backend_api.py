@@ -45,6 +45,7 @@ SEASON_DATE_FALLBACK_PATH = DATA_DIR / "season_df.csv"
 PRIMARY_SEASON_DATA_PATH = DATA_DIR / "season_df.csv"
 LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
+CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
 
 # ── Multi-league registry ──────────────────────────────────────────────────
 LEAGUE_REGISTRY: list[dict[str, str]] = [
@@ -78,6 +79,44 @@ TEAM_NAME_ALIASES = {
     "westham": "westhamunited",
     "wolves": "wolverhampton",
     "brighton": "brightonhovealbion",
+}
+
+OPPONENT_RANK_FILTER_CONFIG: dict[str, dict[str, Any]] = {
+    "opponent_rank_xgd_range": {
+        "label": "xGD",
+        "table_column": "expected_goal_difference",
+        "ascending": False,
+    },
+    "opponent_rank_xgf_range": {
+        "label": "xGF",
+        "table_column": "expected_goals_for",
+        "ascending": False,
+    },
+    "opponent_rank_xga_range": {
+        "label": "xGA",
+        "table_column": "expected_goals_against",
+        "ascending": True,
+    },
+    "opponent_rank_position_range": {
+        "label": "Position",
+        "table_column": "rank",
+        "ascending": True,
+    },
+    "opponent_rank_corners_range": {
+        "label": "Corners",
+        "table_column": "average_corners",
+        "ascending": False,
+    },
+    "opponent_rank_momentum_range": {
+        "label": "Momentum",
+        "table_column": "momentum",
+        "ascending": False,
+    },
+    "opponent_rank_possession_range": {
+        "label": "Possession",
+        "table_column": "average_possession",
+        "ascending": False,
+    },
 }
 
 DATE_COLUMN_CANDIDATES = (
@@ -927,6 +966,138 @@ def _parse_filters(payload: dict[str, Any]) -> list[FilterSpec]:
     return _default_evidence_filters({})
 
 
+@lru_cache(maxsize=8)
+def _load_league_table(league_id: str) -> pd.DataFrame:
+    if not league_id:
+        return pd.DataFrame()
+    table_path = LEAGUES_DIR / str(league_id) / "league_table.csv"
+    if not table_path.exists():
+        return pd.DataFrame()
+    try:
+        table_df = pd.read_csv(table_path)
+    except Exception:
+        return pd.DataFrame()
+    if table_df.empty or "team" not in table_df.columns:
+        return pd.DataFrame()
+    return table_df
+
+
+def _normalize_rank_range(raw_value: Any, max_rank: int) -> tuple[int, int] | None:
+    if not isinstance(raw_value, (list, tuple)) or len(raw_value) != 2:
+        return None
+    try:
+        low = int(float(raw_value[0]))
+        high = int(float(raw_value[1]))
+    except (TypeError, ValueError):
+        return None
+    if low > high:
+        low, high = high, low
+    low = max(1, min(max_rank, low))
+    high = max(1, min(max_rank, high))
+    if low > high:
+        return None
+    return (low, high)
+
+
+def _parse_opponent_rank_filters(filters_payload: dict[str, Any], max_rank: int) -> dict[str, tuple[int, int]]:
+    parsed: dict[str, tuple[int, int]] = {}
+    for key in OPPONENT_RANK_FILTER_CONFIG:
+        normalized_range = _normalize_rank_range(filters_payload.get(key), max_rank=max_rank)
+        if normalized_range is not None and normalized_range != (1, max_rank):
+            parsed[key] = normalized_range
+    return parsed
+
+
+def _build_team_rank_map(table_df: pd.DataFrame, filter_key: str) -> dict[str, int]:
+    config = OPPONENT_RANK_FILTER_CONFIG.get(filter_key)
+    if not config:
+        return {}
+
+    column = str(config["table_column"])
+    if column not in table_df.columns:
+        return {}
+
+    team_series = table_df["team"].astype(str)
+    if filter_key == "opponent_rank_position_range":
+        rank_values = pd.to_numeric(table_df["rank"], errors="coerce")
+    else:
+        metric_values = pd.to_numeric(table_df[column], errors="coerce")
+        rank_values = metric_values.rank(method="min", ascending=bool(config["ascending"]))
+
+    mapping: dict[str, int] = {}
+    for team_name, rank_value in zip(team_series.tolist(), rank_values.tolist()):
+        if pd.isna(rank_value):
+            continue
+        normalized_team = _normalize_team_name(team_name)
+        if normalized_team:
+            mapping[normalized_team] = int(rank_value)
+    return mapping
+
+
+def _resolve_opponent_team_name_from_row(row: pd.Series, match_lookup: dict[int, tuple[str, str]]) -> str:
+    match_id = _safe_int(row.get("match_id"), -1)
+    home_name, away_name = match_lookup.get(match_id, ("", ""))
+    venue = str(row.get("venue", "")).strip().lower()
+    if venue == "home":
+        return away_name
+    if venue == "away":
+        return home_name
+    return ""
+
+
+def _apply_opponent_rank_filters(
+    df: pd.DataFrame,
+    filters_payload: dict[str, Any],
+    league_id: str | None,
+    notes: list[str] | None = None,
+    side_label: str = "team",
+) -> pd.DataFrame:
+    if df.empty or not isinstance(filters_payload, dict):
+        return df
+
+    resolved_league_id = str(league_id or "")
+    if not resolved_league_id:
+        return df
+
+    table_df = _load_league_table(resolved_league_id)
+    if table_df.empty:
+        if notes is not None:
+            notes.append(f"{side_label}_opponent_rank_filters_skipped=no_league_table")
+        return df
+
+    max_rank = int(len(table_df))
+    if max_rank <= 0:
+        return df
+
+    rank_filters = _parse_opponent_rank_filters(filters_payload, max_rank=max_rank)
+    if not rank_filters:
+        return df
+
+    match_lookup = _match_name_index()
+    opponent_names = df.apply(lambda row: _resolve_opponent_team_name_from_row(row, match_lookup), axis=1)
+    opponent_norm = opponent_names.map(_normalize_team_name)
+    filtered_df = df.copy()
+    filtered_opponent_norm = opponent_norm.copy()
+
+    for filter_key, (low, high) in rank_filters.items():
+        rank_map = _build_team_rank_map(table_df, filter_key)
+        if not rank_map:
+            if notes is not None:
+                notes.append(f"{side_label}_{filter_key}_skipped=no_rank_map")
+            continue
+
+        before_count = int(len(filtered_df))
+        rank_series = filtered_opponent_norm.map(rank_map)
+        keep_mask = rank_series.between(low, high, inclusive="both").fillna(False)
+        filtered_df = filtered_df.loc[keep_mask]
+        filtered_opponent_norm = filtered_opponent_norm.loc[filtered_df.index]
+        after_count = int(len(filtered_df))
+        if notes is not None:
+            notes.append(f"{side_label}_{filter_key}={low}-{high}:{before_count}->{after_count}")
+
+    return filtered_df
+
+
 def _build_match_datetime_index_from_df(df: pd.DataFrame) -> dict[int, pd.Timestamp]:
     if df.empty:
         return {}
@@ -1058,8 +1229,93 @@ def _split_btts_counts(df: pd.DataFrame) -> dict[str, int]:
     return {"hits": 0, "misses": 0}
 
 
+def _coerce_numeric_series(df: pd.DataFrame, column_candidates: list[str]) -> pd.Series:
+    for column in column_candidates:
+        if column in df.columns:
+            return pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    return pd.Series(0.0, index=df.index, dtype="float64")
+
+
+@lru_cache(maxsize=1)
+def _corner_total_override_by_match_id() -> dict[int, float]:
+    if not CORNER_OVERRIDES_PATH.exists():
+        return {}
+
+    try:
+        overrides_df = pd.read_csv(CORNER_OVERRIDES_PATH)
+    except Exception:
+        return {}
+
+    if overrides_df.empty:
+        return {}
+
+    match_id_col = "match_id" if "match_id" in overrides_df.columns else None
+    total_col = "total_corners" if "total_corners" in overrides_df.columns else None
+    if match_id_col is None or total_col is None:
+        return {}
+
+    match_ids = pd.to_numeric(overrides_df[match_id_col], errors="coerce")
+    totals = pd.to_numeric(overrides_df[total_col], errors="coerce")
+    cleaned = pd.DataFrame({"match_id": match_ids, "total_corners": totals}).dropna(subset=["match_id", "total_corners"])
+    if cleaned.empty:
+        return {}
+
+    cleaned["match_id"] = cleaned["match_id"].astype(int)
+    return {
+        int(row["match_id"]): float(row["total_corners"])
+        for _, row in cleaned.iterrows()
+    }
+
+
+def _resolve_total_corners_series(df: pd.DataFrame) -> pd.Series:
+    if "total_corners" in df.columns:
+        resolved = pd.to_numeric(df["total_corners"], errors="coerce").fillna(0.0)
+    else:
+        home_series = _coerce_numeric_series(df, ["home_corners", "corners_home", "corner_kicks_home"])
+        away_series = _coerce_numeric_series(df, ["away_corners", "corners_away", "corner_kicks_away"])
+        resolved = (home_series + away_series).fillna(0.0)
+
+    overrides = _corner_total_override_by_match_id()
+    if overrides and "match_id" in df.columns:
+        match_ids = pd.to_numeric(df["match_id"], errors="coerce")
+        override_values = match_ids.map(lambda value: overrides.get(int(value)) if pd.notna(value) else None)
+        override_mask = override_values.notna()
+        if override_mask.any():
+            resolved = resolved.copy()
+            resolved.loc[override_mask] = override_values.loc[override_mask].astype(float)
+
+    return resolved
+
+
+def _resolve_total_corners_from_row(row: pd.Series) -> float:
+    match_id = _safe_int(row.get("match_id"), -1)
+    override = _corner_total_override_by_match_id().get(match_id)
+    if override is not None:
+        return float(override)
+
+    total_corners = pd.to_numeric(row.get("total_corners"), errors="coerce")
+    if pd.notna(total_corners):
+        return float(total_corners)
+
+    home_corners = 0.0
+    for column in ("home_corners", "corners_home", "corner_kicks_home"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.notna(value):
+            home_corners = float(value)
+            break
+
+    away_corners = 0.0
+    for column in ("away_corners", "corners_away", "corner_kicks_away"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.notna(value):
+            away_corners = float(value)
+            break
+
+    return home_corners + away_corners
+
+
 def _split_corner_metrics(df: pd.DataFrame, line: float = 8.5) -> dict[str, float]:
-    if "total_corners" not in df.columns:
+    if df.empty:
         return {
             "matches": 0,
             "avg_total_corners": 0.0,
@@ -1069,7 +1325,7 @@ def _split_corner_metrics(df: pd.DataFrame, line: float = 8.5) -> dict[str, floa
             "under": 0,
         }
 
-    corners = pd.to_numeric(df["total_corners"], errors="coerce").fillna(0.0)
+    corners = _resolve_total_corners_series(df)
     if corners.empty:
         return {
             "matches": 0,
@@ -1106,7 +1362,98 @@ def _match_name_index() -> dict[int, tuple[str, str]]:
     return mapping
 
 
-def _build_recent_matches(df: pd.DataFrame) -> list[dict[str, Any]]:
+def _safe_optional_float(value: Any) -> float | None:
+    numeric = _safe_float(value, float("nan"))
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
+def _resolve_team_opponent_values(
+    row: pd.Series,
+    venue: str,
+    home_key: str,
+    away_key: str,
+) -> tuple[float | None, float | None]:
+    home_value = _safe_optional_float(row.get(home_key))
+    away_value = _safe_optional_float(row.get(away_key))
+    if venue == "home":
+        return home_value, away_value
+    if venue == "away":
+        return away_value, home_value
+    return home_value, away_value
+
+
+@lru_cache(maxsize=16)
+def _opponent_rank_maps_for_league(league_id: str) -> dict[str, dict[str, int]]:
+    resolved_league_id = str(league_id or "").strip()
+    if not resolved_league_id:
+        return {}
+
+    table_df = _load_league_table(resolved_league_id)
+    if table_df.empty:
+        return {}
+
+    return {
+        key: _build_team_rank_map(table_df, key)
+        for key in OPPONENT_RANK_FILTER_CONFIG
+    }
+
+
+def _build_overlay_metrics_from_row(
+    row: pd.Series,
+    venue: str,
+    opponent_name: str,
+    league_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_venue = str(venue).strip().lower()
+    team_momentum, opponent_momentum = _resolve_team_opponent_values(
+        row, normalized_venue, "home_momentum", "away_momentum"
+    )
+    team_xg, opponent_xg = _resolve_team_opponent_values(
+        row, normalized_venue, "expected_goals_home", "expected_goals_away"
+    )
+    team_possession, opponent_possession = _resolve_team_opponent_values(
+        row, normalized_venue, "ball_possession_home", "ball_possession_away"
+    )
+    team_field_tilt, _ = _resolve_team_opponent_values(
+        row, normalized_venue, "field_tilt_home", "field_tilt_away"
+    )
+
+    team_goals = _safe_optional_float(row.get("goals_scored"))
+    opponent_goals = _safe_optional_float(row.get("opponent_goals"))
+    total_goals = _safe_optional_float(row.get("total_goals"))
+    if total_goals is None and team_goals is not None and opponent_goals is not None:
+        total_goals = round(team_goals + opponent_goals, 2)
+
+    overlay_payload: dict[str, Any] = {
+        "team_momentum_range": team_momentum,
+        "opponent_momentum_range": opponent_momentum,
+        "total_match_goals_range": total_goals,
+        "team_goals_range": team_goals,
+        "opposition_goals_range": opponent_goals,
+        "team_xg": team_xg,
+        "opponent_xg": opponent_xg,
+        "team_xg_range": team_xg,
+        "opposition_xg_range": opponent_xg,
+        "team_possession_range": team_possession,
+        "opposition_possession_range": opponent_possession,
+        "field_tilt_range": team_field_tilt,
+    }
+
+    resolved_league_id = str(league_id or row.get("league_id", "") or "").strip()
+    opponent_norm = _normalize_team_name(opponent_name)
+    if resolved_league_id and opponent_norm:
+        rank_maps = _opponent_rank_maps_for_league(resolved_league_id)
+        for filter_key, rank_map in rank_maps.items():
+            rank_value = rank_map.get(opponent_norm)
+            if rank_value is not None:
+                overlay_payload[filter_key] = int(rank_value)
+
+    return overlay_payload
+
+
+def _build_recent_matches(df: pd.DataFrame, league_id: str | None = None) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
@@ -1164,12 +1511,22 @@ def _build_recent_matches(df: pd.DataFrame) -> list[dict[str, Any]]:
                 "result": result,
                 "team_momentum": home_momentum if venue == "home" else away_momentum,
                 "opponent_momentum": away_momentum if venue == "home" else home_momentum,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
     return rows
 
 
-def _build_recent_matches_over_under(df: pd.DataFrame, line: float) -> list[dict[str, Any]]:
+def _build_recent_matches_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
@@ -1218,6 +1575,12 @@ def _build_recent_matches_over_under(df: pd.DataFrame, line: float) -> list[dict
                 "match_date": match_date,
                 "total_goals": total_goals,
                 "over_under_result": over_under_result,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
 
@@ -1225,7 +1588,10 @@ def _build_recent_matches_over_under(df: pd.DataFrame, line: float) -> list[dict
 
 
 def _build_recent_matches_team_goals_over_under(
-    df: pd.DataFrame, line: float, goals_column: str = "goals_scored"
+    df: pd.DataFrame,
+    line: float,
+    goals_column: str = "goals_scored",
+    league_id: str | None = None,
 ) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
@@ -1275,13 +1641,23 @@ def _build_recent_matches_team_goals_over_under(
                 "match_date": match_date,
                 "team_goals": team_goals,
                 "over_under_result": over_under_result,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
 
     return rows
 
 
-def _build_recent_matches_corners(df: pd.DataFrame, line: float = 8.5) -> list[dict[str, Any]]:
+def _build_recent_matches_corners(
+    df: pd.DataFrame,
+    line: float = 8.5,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
@@ -1291,7 +1667,7 @@ def _build_recent_matches_corners(df: pd.DataFrame, line: float = 8.5) -> list[d
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-        total_corners = float(row.get("total_corners", 0.0))
+        total_corners = _resolve_total_corners_from_row(row)
 
         if venue == "home":
             team_name = home_name
@@ -1330,13 +1706,22 @@ def _build_recent_matches_corners(df: pd.DataFrame, line: float = 8.5) -> list[d
                 "match_date": match_date,
                 "total_corners": total_corners,
                 "corners_over_under_result": corners_over_under_result,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
 
     return rows
 
 
-def _build_recent_matches_double_chance(df: pd.DataFrame) -> list[dict[str, Any]]:
+def _build_recent_matches_double_chance(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
@@ -1394,13 +1779,22 @@ def _build_recent_matches_double_chance(df: pd.DataFrame) -> list[dict[str, Any]
                 "result": result,
                 "double_chance_result": "H" if is_hit else "M",
                 "double_chance_value": 1.0 if is_hit else 0.1,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
 
     return rows
 
 
-def _build_recent_matches_btts(df: pd.DataFrame) -> list[dict[str, Any]]:
+def _build_recent_matches_btts(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
     recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
@@ -1452,6 +1846,12 @@ def _build_recent_matches_btts(df: pd.DataFrame) -> list[dict[str, Any]]:
                 "goals_scored": goals_scored,
                 "opponent_goals": opponent_goals,
                 "btts_result": "Y" if is_btts else "N",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
             }
         )
 
@@ -1686,6 +2086,22 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_result_counts(home_df)
         away_metrics = _split_result_counts(away_df)
@@ -1733,8 +2149,8 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches(home_df),
-                "away": _build_recent_matches(away_df),
+                "home": _build_recent_matches(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches(away_df, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }
@@ -1811,6 +2227,22 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_over_under_counts(home_df, line)
         away_metrics = _split_over_under_counts(away_df, line)
@@ -1852,8 +2284,8 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches_over_under(home_df, line),
-                "away": _build_recent_matches_over_under(away_df, line),
+                "home": _build_recent_matches_over_under(home_df, line, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_over_under(away_df, line, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }
@@ -1922,6 +2354,22 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_double_chance_counts(home_df)
         away_metrics = _split_double_chance_counts(away_df)
@@ -1962,8 +2410,8 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches_double_chance(home_df),
-                "away": _build_recent_matches_double_chance(away_df),
+                "home": _build_recent_matches_double_chance(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_double_chance(away_df, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }
@@ -2035,6 +2483,22 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_btts_counts(home_df)
         away_metrics = _split_btts_counts(away_df)
@@ -2075,8 +2539,8 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches_btts(home_df),
-                "away": _build_recent_matches_btts(away_df),
+                "home": _build_recent_matches_btts(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_btts(away_df, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }
@@ -2136,6 +2600,15 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = pd.DataFrame()
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
 
         home_metrics = _split_over_under_counts_for_column(home_df, line, "goals_scored")
         away_metrics = {"over": 0, "under": 0}
@@ -2175,7 +2648,12 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches_team_goals_over_under(home_df, line, goals_column="goals_scored"),
+                "home": _build_recent_matches_team_goals_over_under(
+                    home_df,
+                    line,
+                    goals_column="goals_scored",
+                    league_id=league_id_for_ranking,
+                ),
                 "away": [],
             },
             "notes": notes,
@@ -2236,6 +2714,15 @@ def create_app() -> Flask:
 
         away_df = _sort_team_history(away_df)
         home_df = pd.DataFrame()
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = {"over": 0, "under": 0}
         away_metrics = _split_over_under_counts_for_column(away_df, line, "goals_scored")
@@ -2276,7 +2763,12 @@ def create_app() -> Flask:
             "chartSeries": chart_series,
             "recent_matches": {
                 "home": [],
-                "away": _build_recent_matches_team_goals_over_under(away_df, line, goals_column="goals_scored"),
+                "away": _build_recent_matches_team_goals_over_under(
+                    away_df,
+                    line,
+                    goals_column="goals_scored",
+                    league_id=league_id_for_ranking,
+                ),
             },
             "notes": notes,
         }
@@ -2349,6 +2841,22 @@ def create_app() -> Flask:
 
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        league_id_for_ranking = fixture.league_id if fixture is not None else ""
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_corner_metrics(home_df, line)
         away_metrics = _split_corner_metrics(away_df, line)
@@ -2388,8 +2896,8 @@ def create_app() -> Flask:
                 },
             ],
             "recent_matches": {
-                "home": _build_recent_matches_corners(home_df, line),
-                "away": _build_recent_matches_corners(away_df, line),
+                "home": _build_recent_matches_corners(home_df, line, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_corners(away_df, line, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }
