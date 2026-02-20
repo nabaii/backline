@@ -5,12 +5,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
-from store.analytics_store import AnalyticsStore
-from builders.match_analytics_builder import MatchAnalyticsBuilder
-from bet_type.double_chance.double_chance import DoubleChanceWorkspace
-from bet_type.over_under.over_under import OverUnderWorkspace
-from bet_type.one_x_two.one_x_two import OneXTwoWorkspace
-from filters.filters import (
+from backend.store.analytics_store import AnalyticsStore
+from backend.builders.match_analytics_builder import MatchAnalyticsBuilder
+from backend.bet_type.double_chance.double_chance import DoubleChanceWorkspace
+from backend.bet_type.over_under.over_under import OverUnderWorkspace
+from backend.bet_type.one_x_two.one_x_two import OneXTwoWorkspace
+from backend.filters.filters import (
     GoalsScored,
     GoalsConceded,
     TeamMomentumFilter,
@@ -22,8 +22,8 @@ from filters.filters import (
     VenueFilter,
     XGDifferenceFilter,
 )
-from chart.chart_spec import ChartSpec, AxisSpec
-from metrics.metric_spec import HitRateMetric, SampleSizeMetric
+from backend.chart.chart_spec import ChartSpec, AxisSpec
+from backend.metrics.metric_spec import HitRateMetric, SampleSizeMetric
 
 
 def test_chart_spec():
