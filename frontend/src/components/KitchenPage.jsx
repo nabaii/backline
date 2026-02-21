@@ -104,6 +104,7 @@ export default function KitchenPage() {
     if (!selectedLeague) return
     let cancelled = false
     setError(null)
+    setSelectedMatch(null)
     const cachedFixtures = fixturesCacheRef.current.get(selectedLeague)
     if (cachedFixtures) {
       setFixtures(cachedFixtures)
@@ -177,6 +178,9 @@ export default function KitchenPage() {
               matchId={selectedMatch}
               homeTeamId={selectedFixture?.home_team_id}
               awayTeamId={selectedFixture?.away_team_id}
+              homeTeamName={selectedFixture?.home_team_name}
+              awayTeamName={selectedFixture?.away_team_name}
+              leagueId={selectedLeague}
             />
           ) : isLeagueLoading ? (
             <WorkspaceLoadingPlaceholder />

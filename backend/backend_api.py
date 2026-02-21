@@ -728,14 +728,16 @@ def _resolve_fixture_for_match(snapshot: FixtureSnapshot | None, match_id: int) 
     if match_id <= 0:
         return None
 
+    # Prefer live non-EPL cache first so workspace requests stay aligned with
+    # fixtures returned by `/api/fixtures` for non-Premier League leagues.
+    fixture = _lookup_cached_live_fixture(match_id)
+    if fixture is not None:
+        return fixture
+
     if snapshot is not None:
         fixture = next((f for f in snapshot.fixtures if f.match_id == match_id), None)
         if fixture is not None:
             return fixture
-
-    fixture = _lookup_cached_live_fixture(match_id)
-    if fixture is not None:
-        return fixture
 
     return _historical_fixture_index().get(match_id)
 
@@ -1906,19 +1908,27 @@ def _resolve_team_anchor_match(
     team_id: int,
     team_name: str | None,
     preferred_perspective: str,
+    league_id: str | None = None,
 ) -> tuple[int, str] | None:
+    scoped_df = raw_df
+    resolved_league_id = str(league_id or "").strip()
+    if resolved_league_id and "league_slug" in raw_df.columns:
+        league_matches = raw_df[raw_df["league_slug"].astype(str) == resolved_league_id]
+        if not league_matches.empty:
+            scoped_df = league_matches
+
     for candidate_id in _candidate_team_ids(team_id, team_name):
         if preferred_perspective == "home":
-            preferred = raw_df[raw_df["home_team_id"] == candidate_id]
+            preferred = scoped_df[scoped_df["home_team_id"] == candidate_id]
         else:
-            preferred = raw_df[raw_df["away_team_id"] == candidate_id]
+            preferred = scoped_df[scoped_df["away_team_id"] == candidate_id]
 
         if not preferred.empty:
             row = preferred.sort_values("match_id", ascending=False).iloc[0]
             return int(row["match_id"]), preferred_perspective
 
-        fallback = raw_df[
-            (raw_df["home_team_id"] == candidate_id) | (raw_df["away_team_id"] == candidate_id)
+        fallback = scoped_df[
+            (scoped_df["home_team_id"] == candidate_id) | (scoped_df["away_team_id"] == candidate_id)
         ]
         if not fallback.empty:
             row = fallback.sort_values("match_id", ascending=False).iloc[0]
@@ -2081,6 +2091,8 @@ def create_app() -> Flask:
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2091,8 +2103,20 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             workspace = OneXTwoWorkspace(store, outcome_type="1")
@@ -2128,7 +2152,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,
@@ -2216,6 +2239,8 @@ def create_app() -> Flask:
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2230,8 +2255,20 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             workspace = OverUnderWorkspace(store)
@@ -2269,7 +2306,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,
@@ -2349,6 +2385,8 @@ def create_app() -> Flask:
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2359,8 +2397,20 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             workspace = DoubleChanceWorkspace(store)
@@ -2396,7 +2446,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,
@@ -2475,6 +2524,8 @@ def create_app() -> Flask:
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2485,8 +2536,20 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             filter_validator = DoubleChanceWorkspace(store)
@@ -2525,7 +2588,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,
@@ -2604,6 +2666,8 @@ def create_app() -> Flask:
         home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2617,7 +2681,13 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             filter_validator = OverUnderWorkspace(store)
@@ -2642,7 +2712,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = pd.DataFrame()
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,
@@ -2718,6 +2787,8 @@ def create_app() -> Flask:
         home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2731,7 +2802,13 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             filter_validator = OverUnderWorkspace(store)
@@ -2756,7 +2833,6 @@ def create_app() -> Flask:
         away_df = _sort_team_history(away_df)
         home_df = pd.DataFrame()
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         away_df = _apply_opponent_rank_filters(
             away_df,
             ranking_filters_payload,
@@ -2834,6 +2910,8 @@ def create_app() -> Flask:
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
@@ -2844,8 +2922,20 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
-            home_anchor = _resolve_team_anchor_match(raw_df, home_team_id, home_team_name, "home")
-            away_anchor = _resolve_team_anchor_match(raw_df, away_team_id, away_team_name, "away")
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
 
             store = _build_store()
             workspace = CornerWorkspace(store)
@@ -2883,7 +2973,6 @@ def create_app() -> Flask:
         home_df = _sort_team_history(home_df)
         away_df = _sort_team_history(away_df)
         ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
-        league_id_for_ranking = fixture.league_id if fixture is not None else ""
         home_df = _apply_opponent_rank_filters(
             home_df,
             ranking_filters_payload,

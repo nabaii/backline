@@ -226,6 +226,9 @@ function buildWorkspaceCacheKey({
   matchId,
   homeTeamId,
   awayTeamId,
+  homeTeamName,
+  awayTeamName,
+  leagueId,
   betType,
   filters,
   overUnderLine,
@@ -235,6 +238,9 @@ function buildWorkspaceCacheKey({
     matchId,
     homeTeamId,
     awayTeamId,
+    homeTeamName,
+    awayTeamName,
+    leagueId,
     betType,
     filters,
     overUnderLine,
@@ -242,7 +248,14 @@ function buildWorkspaceCacheKey({
   })
 }
 
-export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
+export default function BetTypeWorkspace({
+  matchId,
+  homeTeamId,
+  awayTeamId,
+  homeTeamName,
+  awayTeamName,
+  leagueId,
+}) {
   const [betType, setBetType] = useState(BET_TYPE_ONE_X_TWO)
   const [workspace, setWorkspace] = useState(null)
   const [draftFilters, setDraftFilters] = useState(createDefaultFilters)
@@ -297,6 +310,9 @@ export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
       matchId,
       homeTeamId,
       awayTeamId,
+      homeTeamName,
+      awayTeamName,
+      leagueId,
       betType,
       filters: appliedFilters,
       overUnderLine: appliedOverUnderLine,
@@ -312,6 +328,9 @@ export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
       match_id: matchId,
       home_team_id: homeTeamId,
       away_team_id: awayTeamId,
+      home_team_name: homeTeamName,
+      away_team_name: awayTeamName,
+      league_id: leagueId,
       limit: 0,
       filters: appliedFilters,
       evidenceFilters,
@@ -347,7 +366,18 @@ export default function BetTypeWorkspace({ matchId, homeTeamId, awayTeamId }) {
         setWorkspace(null)
         setError(err?.message || 'Failed to load workspace')
       })
-  }, [matchId, homeTeamId, awayTeamId, betType, appliedFilters, appliedOverUnderLine, appliedCornersLine])
+  }, [
+    matchId,
+    homeTeamId,
+    awayTeamId,
+    homeTeamName,
+    awayTeamName,
+    leagueId,
+    betType,
+    appliedFilters,
+    appliedOverUnderLine,
+    appliedCornersLine,
+  ])
 
   useEffect(() => {
     if (!matchId) return
