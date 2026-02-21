@@ -236,6 +236,7 @@ const TEAM_ALIASES = {
   om: 'olympiquedemarseille',
   paris: 'parisfc',
   psg: 'parissaintgermain',
+  lens: 'rclens',
   rclensfc: 'rclens',
   strasbourg: 'rcstrasbourg',
   rcstrasbourgalsace: 'rcstrasbourg',

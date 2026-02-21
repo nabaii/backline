@@ -471,11 +471,12 @@ def _get_live_sofascore_league_fixtures(
 
 
 def _lookup_cached_live_fixture(match_id: int) -> FixtureRow | None:
-    for entry in _sofascore_fixture_cache.values():
-        fixtures = entry.get("fixtures", []) if isinstance(entry, dict) else []
-        for fixture in fixtures:
-            if fixture.match_id == match_id:
-                return fixture
+    for cache in (_sofascore_fixture_cache, _understat_fixture_cache):
+        for entry in cache.values():
+            fixtures = entry.get("fixtures", []) if isinstance(entry, dict) else []
+            for fixture in fixtures:
+                if fixture.match_id == match_id:
+                    return fixture
     return None
 
 
