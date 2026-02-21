@@ -147,6 +147,7 @@ const TEAM_ALIASES = {
   leeds: 'leedsunited',
   leedsunitedfc: 'leedsunited',
   astonvillafc: 'astonvilla',
+  ipswichtownfc: 'ipswich',
   ipswitchtownfc: 'ipswich',
   ipswichtown: 'ipswich',
   leicestercity: 'leicester',
@@ -180,11 +181,14 @@ const TEAM_ALIASES = {
   eintrachtfrankfurt: 'eintracht',
   stpauli: 'fcstpauli',
   hsv: 'hamburgersv',
+  '1heidenheim': 'heidenheim',
   '1fcheidenheim': 'heidenheim',
   heidenheimfc: 'heidenheim',
+  '1koln': 'koln',
   '1fckoln': 'koln',
   fckoln: 'koln',
   mainz: 'mainz05',
+  fsvmainz05: 'mainz05',
   '1fsvmainz05': 'mainz05',
   leipzig: 'rbleipzig',
   borussialeipzig: 'rbleipzig',
@@ -195,6 +199,7 @@ const TEAM_ALIASES = {
   tsg1899hoffenheim: 'tsghoffenheim',
   hoffenheimtsg: 'tsghoffenheim',
   union: 'unionberlin',
+  '1unionberlin': 'unionberlin',
   '1fcunionberlin': 'unionberlin',
   unionberlinfc: 'unionberlin',
   vfbstuttgart: 'stuttgart',
@@ -229,6 +234,7 @@ const TEAM_ALIASES = {
   ol: 'olympiquelyonnais',
   marseille: 'olympiquedemarseille',
   om: 'olympiquedemarseille',
+  paris: 'parisfc',
   psg: 'parissaintgermain',
   rclensfc: 'rclens',
   strasbourg: 'rcstrasbourg',
@@ -241,10 +247,11 @@ const TEAM_ALIASES = {
 }
 
 const LEAGUE_LOGO_LOCAL = {
-  england_premier_league: localLogoPath('pl', 'Premier%20League.svg'),
+  england_premier_league: localLogoPath('pl', 'Premier%20League%20logo.svg'),
   spain_la_liga: localLogoPath('la-liga', 'La%20Liga.svg'),
   germany_bundesliga: localLogoPath('bundesliga', 'Bundesliga.svg'),
   italy_serie_a: localLogoPath('serie-a', 'Seria%20A.svg'),
+  france_ligue_1: localLogoPath('ligue-1', 'Ligue%201%20logo.svg'),
 }
 
 const LEAGUE_LOGO_MAP = {
