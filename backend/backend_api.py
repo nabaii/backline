@@ -941,6 +941,35 @@ def _select_next_up_fixtures(
     return selected, target_gameweek, selected_gameweeks, True
 
 
+def _sort_fixtures_by_kickoff(rows: list[FixtureRow]) -> list[FixtureRow]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _parse_utc_datetime(row.kickoff) is None,
+            _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
+            row.gameweek,
+            row.home_team_name,
+        ),
+    )
+
+
+def _upcoming_or_live_fixtures(
+    rows: list[FixtureRow],
+    reference_time: datetime,
+    stale_grace_hours: int = 6,
+) -> list[FixtureRow]:
+    stale_cutoff = reference_time - timedelta(hours=max(0, int(stale_grace_hours)))
+    filtered: list[FixtureRow] = []
+    for row in rows:
+        if row.finished:
+            continue
+        kickoff_dt = _parse_utc_datetime(row.kickoff)
+        if kickoff_dt is not None and kickoff_dt < stale_cutoff:
+            continue
+        filtered.append(row)
+    return _sort_fixtures_by_kickoff(filtered)
+
+
 def _default_evidence_filters(filters_payload: dict[str, Any]) -> list[FilterSpec]:
     specs: list[FilterSpec] = []
 
@@ -1983,7 +2012,10 @@ def create_app() -> Flask:
         gameweek_param = request.args.get("gameweek")
         requested_gameweek = _safe_int(gameweek_param, -1) if gameweek_param is not None else None
         requested_date = request.args.get("date")
-        reference_time = _parse_utc_datetime(requested_date) or datetime.now(timezone.utc)
+        now_reference = datetime.now(timezone.utc)
+        requested_reference = _parse_utc_datetime(requested_date)
+        # Never use a reference time behind "now" to avoid surfacing stale fixtures.
+        reference_time = max(now_reference, requested_reference) if requested_reference else now_reference
         response_source = snapshot.source
         response_updated_at = snapshot.updated_at
 
@@ -2005,11 +2037,13 @@ def create_app() -> Flask:
         if requested_gameweek is not None and requested_gameweek > 0:
             gameweek = requested_gameweek
             fixtures = [f for f in fixtures if f.gameweek == gameweek]
+            fixtures = _upcoming_or_live_fixtures(fixtures, reference_time)
             selected_gameweeks = [gameweek] if fixtures else []
             if not fixtures:
-                # If an explicit gameweek has no fixtures (e.g. schedule gap),
-                # return all league fixtures so the UI still has selectable matches.
-                fixtures = league_fixtures
+                fixtures = _upcoming_or_live_fixtures(league_fixtures, reference_time)
+                selected_gameweeks = sorted({f.gameweek for f in fixtures if f.gameweek > 0})
+                if selected_gameweeks:
+                    gameweek = selected_gameweeks[0]
                 fallback_used = True
         else:
             fixtures, gameweek, selected_gameweeks, fallback_used = _select_next_up_fixtures(
@@ -2018,16 +2052,9 @@ def create_app() -> Flask:
                 gameweeks_to_include=2,
             )
             if not fixtures:
-                gameweek = snapshot.current_gameweek
-                selected_gameweeks = [gameweek] if gameweek > 0 else []
-                # For leagues without gameweek data, sort by kickoff descending
-                # and show the most recent matches
-                sorted_fixtures = sorted(
-                    league_fixtures,
-                    key=lambda f: f.kickoff or "",
-                    reverse=True,
-                )
-                fixtures = sorted_fixtures[:20]  # show 20 most recent
+                fixtures = _upcoming_or_live_fixtures(league_fixtures, reference_time)
+                selected_gameweeks = sorted({f.gameweek for f in fixtures if f.gameweek > 0})
+                gameweek = selected_gameweeks[0] if selected_gameweeks else snapshot.current_gameweek
                 fallback_used = True
 
         payload = [
