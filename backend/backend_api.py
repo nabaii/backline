@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import csv
+import difflib
+import gzip
 import json
 import os
 import re
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -63,11 +67,24 @@ FPL_FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
 FPL_REQUEST_TIMEOUT_SECONDS = 30
 FPL_CACHE_TTL_SECONDS = 60
 SOFASCORE_FIXTURE_CACHE_TTL_SECONDS = 600
+UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS = 900
 SOFASCORE_LEAGUE_NAME_BY_ID: dict[str, str] = {
     "spain_la_liga": "Spain La Liga",
     "germany_bundesliga": "Germany Bundesliga",
     "italy_serie_a": "Italy Serie A",
     "france_ligue_1": "France Ligue 1",
+}
+UNDERSTAT_LEAGUE_NAME_BY_ID: dict[str, str] = {
+    "spain_la_liga": "La liga",
+    "germany_bundesliga": "Bundesliga",
+    "italy_serie_a": "Serie A",
+    "france_ligue_1": "Ligue 1",
+}
+UNDERSTAT_MATCH_ID_OFFSET_BY_LEAGUE: dict[str, int] = {
+    "spain_la_liga": 7_100_000_000,
+    "germany_bundesliga": 7_200_000_000,
+    "italy_serie_a": 7_300_000_000,
+    "france_ligue_1": 7_400_000_000,
 }
 
 TEAM_NAME_ALIASES = {
@@ -161,6 +178,7 @@ _snapshot_cache: dict[str, Any] = {
 }
 _sofascore_fixture_cache: dict[str, dict[str, Any]] = {}
 _sofascore_season_cache: dict[str, dict[str, Any]] = {}
+_understat_fixture_cache: dict[str, dict[str, Any]] = {}
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -459,6 +477,184 @@ def _lookup_cached_live_fixture(match_id: int) -> FixtureRow | None:
             if fixture.match_id == match_id:
                 return fixture
     return None
+
+
+def _understat_season_year(reference_time: datetime | None = None) -> str:
+    now = reference_time or datetime.now(timezone.utc)
+    start_year = now.year if now.month >= 7 else now.year - 1
+    return str(start_year)
+
+
+def _understat_json(url: str, referer: str) -> Any:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": referer,
+        },
+    )
+    with urlopen(req, timeout=FPL_REQUEST_TIMEOUT_SECONDS) as response:
+        raw = response.read()
+        content_encoding = str(response.headers.get("Content-Encoding", "")).lower()
+
+    if "gzip" in content_encoding or raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    text = raw.decode("utf-8-sig", errors="replace")
+    return json.loads(text)
+
+
+@lru_cache(maxsize=8)
+def _league_team_id_lookup(league_id: str) -> dict[str, int]:
+    resolved_league_id = str(league_id or "").strip()
+    if not resolved_league_id:
+        return {}
+
+    raw_df = _load_raw_df()
+    if "league_slug" not in raw_df.columns:
+        return {}
+
+    scoped_df = raw_df[raw_df["league_slug"].astype(str) == resolved_league_id]
+    if scoped_df.empty:
+        return {}
+
+    mapping: dict[str, int] = {}
+    for team_col, id_col in (("home_team", "home_team_id"), ("away_team", "away_team_id")):
+        if team_col not in scoped_df.columns or id_col not in scoped_df.columns:
+            continue
+        for team_name, team_id in zip(scoped_df[team_col].tolist(), scoped_df[id_col].tolist()):
+            normalized = _normalize_team_name(team_name)
+            parsed_id = _safe_int(team_id, 0)
+            if normalized and parsed_id > 0 and normalized not in mapping:
+                mapping[normalized] = parsed_id
+    return mapping
+
+
+def _resolve_league_team_id(league_id: str, team_name: str, fallback_team_id: int = 0) -> int:
+    mapped_ids = _candidate_team_ids(0, team_name)
+    if mapped_ids:
+        return int(mapped_ids[0])
+
+    normalized_name = _normalize_team_name(team_name)
+    league_lookup = _league_team_id_lookup(league_id)
+    if normalized_name in league_lookup:
+        return int(league_lookup[normalized_name])
+
+    if normalized_name and league_lookup:
+        closest = difflib.get_close_matches(normalized_name, list(league_lookup.keys()), n=1, cutoff=0.72)
+        if closest:
+            return int(league_lookup[closest[0]])
+
+    return int(fallback_team_id) if fallback_team_id > 0 else 0
+
+
+def _understat_event_to_fixture_row(event: dict[str, Any], league_id: str) -> FixtureRow | None:
+    if not isinstance(event, dict):
+        return None
+
+    home_team = event.get("h") if isinstance(event.get("h"), dict) else {}
+    away_team = event.get("a") if isinstance(event.get("a"), dict) else {}
+    home_name = str(home_team.get("title", "")).strip()
+    away_name = str(away_team.get("title", "")).strip()
+    if not home_name or not away_name:
+        return None
+
+    kickoff_dt = _parse_utc_datetime(event.get("datetime"))
+    kickoff = kickoff_dt.isoformat().replace("+00:00", "Z") if kickoff_dt else ""
+    gameweek = int(kickoff_dt.isocalendar().week) if kickoff_dt else 0
+
+    provider_match_id = _safe_int(event.get("id"), 0)
+    match_offset = UNDERSTAT_MATCH_ID_OFFSET_BY_LEAGUE.get(league_id, 7_000_000_000)
+    if provider_match_id > 0:
+        match_id = match_offset + provider_match_id
+    else:
+        seed = f"{league_id}:{home_name}:{away_name}:{kickoff}".encode("utf-8", errors="ignore")
+        match_id = match_offset + int(zlib.crc32(seed) & 0xFFFFFFFF)
+
+    goals = event.get("goals") if isinstance(event.get("goals"), dict) else {}
+    finished = bool(event.get("isResult"))
+    home_score = _safe_opt_int(goals.get("h")) if finished else None
+    away_score = _safe_opt_int(goals.get("a")) if finished else None
+
+    home_team_id = _resolve_league_team_id(league_id, home_name, fallback_team_id=0)
+    away_team_id = _resolve_league_team_id(league_id, away_name, fallback_team_id=0)
+
+    return FixtureRow(
+        match_id=match_id,
+        league_id=league_id,
+        gameweek=gameweek,
+        kickoff=kickoff,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        home_team_name=home_name,
+        away_team_name=away_name,
+        home_team_score=home_score,
+        away_team_score=away_score,
+        finished=finished,
+    )
+
+
+def _get_understat_league_fixtures(
+    league_id: str,
+    reference_time: datetime | None = None,
+) -> list[FixtureRow]:
+    league_name = UNDERSTAT_LEAGUE_NAME_BY_ID.get(league_id)
+    if not league_name:
+        return []
+
+    now = datetime.now(timezone.utc)
+    cached = _understat_fixture_cache.get(league_id)
+    cached_expires_at = (
+        cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+        if isinstance(cached, dict)
+        else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+    if isinstance(cached, dict) and now < cached_expires_at:
+        cached_rows = cached.get("fixtures", [])
+        if isinstance(cached_rows, list):
+            return _upcoming_or_live_fixtures(cached_rows, reference_time or now)
+
+    try:
+        season_year = _understat_season_year(reference_time or now)
+        season_candidates = [season_year]
+        try:
+            season_candidates.append(str(int(season_year) - 1))
+        except Exception:
+            pass
+
+        rows: list[FixtureRow] = []
+        for season in season_candidates:
+            league_segment = quote(league_name, safe="")
+            referer_segment = quote(league_name.replace(" ", "_"), safe="_")
+            url = f"https://understat.com/getLeagueData/{league_segment}/{season}/"
+            referer = f"https://understat.com/league/{referer_segment}/{season}"
+            payload = _understat_json(url, referer=referer)
+            dates = payload.get("dates") if isinstance(payload, dict) else None
+            if not isinstance(dates, list):
+                continue
+
+            rows = [
+                row
+                for row in (
+                    _understat_event_to_fixture_row(event, league_id=league_id)
+                    for event in dates
+                )
+                if row is not None
+            ]
+            if rows:
+                break
+
+        if not rows:
+            return []
+
+        rows = _sort_fixtures_by_kickoff(rows)
+        _understat_fixture_cache[league_id] = {
+            "fixtures": rows,
+            "expires_at": now + timedelta(seconds=UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS),
+        }
+        return _upcoming_or_live_fixtures(rows, reference_time or now)
+    except Exception:
+        return []
 
 
 def _normalize_range(value: Any, default_low: float = 0.0, default_high: float = 10.0) -> tuple[float, float]:
@@ -2029,6 +2225,15 @@ def create_app() -> Flask:
                 league_fixtures = live_non_epl_fixtures
                 response_source = "live_sofascore"
                 response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            else:
+                understat_fixtures = _get_understat_league_fixtures(
+                    league_id=league_id,
+                    reference_time=reference_time,
+                )
+                if understat_fixtures:
+                    league_fixtures = understat_fixtures
+                    response_source = "understat_fallback"
+                    response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         fixtures = league_fixtures
         fallback_used = False
