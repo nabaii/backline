@@ -375,77 +375,81 @@ def _get_live_sofascore_league_fixtures(
     if not league_name:
         return []
 
-    now = datetime.now(timezone.utc)
-    cached = _sofascore_fixture_cache.get(league_id)
-    cached_expires_at = (
-        cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
-        if isinstance(cached, dict)
-        else datetime(1970, 1, 1, tzinfo=timezone.utc)
-    )
-    if isinstance(cached, dict) and now < cached_expires_at:
-        return list(cached.get("fixtures", []))
-
-    season_label = _current_season_label(reference_time or now)
-    season_context = _resolve_sofascore_season_context(
-        league_name=league_name,
-        season_label=season_label,
-    )
-    if season_context is None:
-        return []
-    tournament_id, season_id = season_context
-
     try:
-        next_events = _fetch_sofascore_events(
-            tournament_id=tournament_id,
-            season_id=season_id,
-            direction="next",
-            max_pages=1,
+        now = datetime.now(timezone.utc)
+        cached = _sofascore_fixture_cache.get(league_id)
+        cached_expires_at = (
+            cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+            if isinstance(cached, dict)
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
         )
-        last_events = _fetch_sofascore_events(
-            tournament_id=tournament_id,
-            season_id=season_id,
-            direction="last",
-            max_pages=1,
+        if isinstance(cached, dict) and now < cached_expires_at:
+            return list(cached.get("fixtures", []))
+
+        season_label = _current_season_label(reference_time or now)
+        season_context = _resolve_sofascore_season_context(
+            league_name=league_name,
+            season_label=season_label,
         )
+        if season_context is None:
+            return []
+        tournament_id, season_id = season_context
+
+        try:
+            next_events = _fetch_sofascore_events(
+                tournament_id=tournament_id,
+                season_id=season_id,
+                direction="next",
+                max_pages=1,
+            )
+            last_events = _fetch_sofascore_events(
+                tournament_id=tournament_id,
+                season_id=season_id,
+                direction="last",
+                max_pages=1,
+            )
+        except Exception:
+            return []
+
+        # Keep upcoming fixtures plus currently in-progress events from the latest completed page.
+        by_match_id: dict[int, dict[str, Any]] = {}
+        for event in last_events:
+            if not _is_sofascore_event_inprogress(event):
+                continue
+            match_id = _safe_int(event.get("id"), 0)
+            if match_id > 0:
+                by_match_id[match_id] = event
+        for event in next_events:
+            match_id = _safe_int(event.get("id"), 0)
+            if match_id > 0:
+                by_match_id[match_id] = event
+
+        rows = [
+            row
+            for row in (
+                _sofascore_event_to_fixture_row(event, league_id=league_id)
+                for event in by_match_id.values()
+            )
+            if row is not None
+        ]
+
+        rows.sort(
+            key=lambda row: (
+                _parse_utc_datetime(row.kickoff) is None,
+                _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
+                row.gameweek,
+                row.home_team_name,
+            )
+        )
+
+        _sofascore_fixture_cache[league_id] = {
+            "fixtures": rows,
+            "expires_at": now + timedelta(seconds=SOFASCORE_FIXTURE_CACHE_TTL_SECONDS),
+        }
+        return rows
     except Exception:
+        # Never let third-party fixture lookups crash league fixture responses.
         return []
-
-    # Keep upcoming fixtures plus currently in-progress events from the latest completed page.
-    by_match_id: dict[int, dict[str, Any]] = {}
-    for event in last_events:
-        if not _is_sofascore_event_inprogress(event):
-            continue
-        match_id = _safe_int(event.get("id"), 0)
-        if match_id > 0:
-            by_match_id[match_id] = event
-    for event in next_events:
-        match_id = _safe_int(event.get("id"), 0)
-        if match_id > 0:
-            by_match_id[match_id] = event
-
-    rows = [
-        row
-        for row in (
-            _sofascore_event_to_fixture_row(event, league_id=league_id)
-            for event in by_match_id.values()
-        )
-        if row is not None
-    ]
-
-    rows.sort(
-        key=lambda row: (
-            _parse_utc_datetime(row.kickoff) is None,
-            _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
-            row.gameweek,
-            row.home_team_name,
-        )
-    )
-
-    _sofascore_fixture_cache[league_id] = {
-        "fixtures": rows,
-        "expires_at": now + timedelta(seconds=SOFASCORE_FIXTURE_CACHE_TTL_SECONDS),
-    }
-    return rows
 
 
 def _lookup_cached_live_fixture(match_id: int) -> FixtureRow | None:
@@ -836,14 +840,31 @@ def _get_nonblocking_fixture_snapshot() -> FixtureSnapshot:
     Returns the best available snapshot without forcing a live network fetch.
     Used by latency-sensitive endpoints like workspace filtering.
     """
-    return _get_fixture_snapshot(force_refresh=False)
+    try:
+        return _get_fixture_snapshot(force_refresh=False)
+    except Exception:
+        csv_snapshot = _load_fixture_csv_snapshot()
+        if csv_snapshot:
+            return csv_snapshot
+        try:
+            return _historical_fixture_snapshot()
+        except Exception:
+            return FixtureSnapshot(
+                fixtures=[],
+                current_gameweek=0,
+                updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                source="empty_fallback",
+            )
 
 
 def _get_live_refreshed_fixture_snapshot() -> FixtureSnapshot:
     """
     Forces a live refresh attempt; falls back safely to cached/local snapshot.
     """
-    return _get_fixture_snapshot(force_refresh=True)
+    try:
+        return _get_fixture_snapshot(force_refresh=True)
+    except Exception:
+        return _get_nonblocking_fixture_snapshot()
 
 
 def _select_next_up_fixtures(
