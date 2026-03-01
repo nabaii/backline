@@ -470,6 +470,40 @@ def _get_live_sofascore_league_fixtures(
         return []
 
 
+def _get_local_matches_json_league_fixtures(
+    league_id: str,
+    reference_time: datetime | None = None,
+) -> list[FixtureRow]:
+    if not league_id:
+        return []
+
+    matches_json_path = LEAGUES_DIR / str(league_id) / "matches_data.json"
+    if not matches_json_path.exists():
+        return []
+
+    try:
+        payload = json.loads(matches_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    rows = [
+        row
+        for row in (
+            _sofascore_event_to_fixture_row(event, league_id=league_id)
+            for event in payload
+            if isinstance(event, dict)
+        )
+        if row is not None
+    ]
+    if not rows:
+        return []
+
+    return _upcoming_or_live_fixtures(rows, reference_time or datetime.now(timezone.utc))
+
+
 def _lookup_cached_live_fixture(match_id: int) -> FixtureRow | None:
     for cache in (_sofascore_fixture_cache, _understat_fixture_cache):
         for entry in cache.values():
@@ -2218,6 +2252,7 @@ def create_app() -> Flask:
 
         league_fixtures = [f for f in snapshot.fixtures if f.league_id == league_id]
         if league_id != "england_premier_league":
+            used_live_source = False
             live_non_epl_fixtures = _get_live_sofascore_league_fixtures(
                 league_id=league_id,
                 reference_time=reference_time,
@@ -2226,6 +2261,7 @@ def create_app() -> Flask:
                 league_fixtures = live_non_epl_fixtures
                 response_source = "live_sofascore"
                 response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                used_live_source = True
             else:
                 understat_fixtures = _get_understat_league_fixtures(
                     league_id=league_id,
@@ -2234,6 +2270,17 @@ def create_app() -> Flask:
                 if understat_fixtures:
                     league_fixtures = understat_fixtures
                     response_source = "understat_fallback"
+                    response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    used_live_source = True
+
+            if not used_live_source:
+                local_non_epl_fixtures = _get_local_matches_json_league_fixtures(
+                    league_id=league_id,
+                    reference_time=reference_time,
+                )
+                if local_non_epl_fixtures:
+                    league_fixtures = local_non_epl_fixtures
+                    response_source = "local_matches_json"
                     response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         fixtures = league_fixtures

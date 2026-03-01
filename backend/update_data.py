@@ -45,6 +45,20 @@ from data.raw.scrape_data import (
 SCRAPE_DELAY_SECONDS = 1.5  # polite delay between API calls
 
 
+def _refresh_epl_fixture_cache_csv() -> None:
+    """Refresh local EPL fixture CSV used by backend fixture snapshot fallback."""
+    try:
+        from backend.backend_api import _fetch_live_fixture_snapshot
+
+        snapshot = _fetch_live_fixture_snapshot()
+        print(
+            "  [OK] Refreshed EPL fixture CSV "
+            f"({len(snapshot.fixtures)} fixtures, source={snapshot.source})"
+        )
+    except Exception as e:
+        print(f"  [!!] EPL fixture CSV refresh failed: {e}")
+
+
 def _load_existing_season_df(csv_path: Path) -> pd.DataFrame | None:
     """Load and return the existing season CSV, or None if missing."""
     if not csv_path.exists():
@@ -128,6 +142,7 @@ def update_league(
     paths = _default_output_paths_for_league(league, output_base_dir)
     csv_path = paths["season_csv_path"]
     table_path = paths["league_table_csv_path"]
+    matches_json_path = paths["matches_json_path"]
     league_dir = paths["league_dir"]
     league_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,6 +165,13 @@ def update_league(
     print(f"  [*] Fetching match list for {season} {league} ...")
     matches = ss.get_match_dicts(season, league)
     print(f"  [OK] Found {len(matches)} total matches in season")
+    try:
+        matches_json_path.parent.mkdir(parents=True, exist_ok=True)
+        with matches_json_path.open("w", encoding="utf-8") as handle:
+            json.dump(matches, handle, ensure_ascii=False, indent=2)
+        print(f"  [OK] Saved matches JSON -> {matches_json_path}")
+    except Exception as e:
+        print(f"  [!!] Failed to save matches JSON at {matches_json_path}: {e}")
 
     # â”€â”€ 3. Identify NEW played matches â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     new_matches = []
@@ -291,6 +313,9 @@ def main():
             print(f"\n  [X] ERROR updating {league}: {e}")
             import traceback
             traceback.print_exc()
+
+    print("\n  [*] Refreshing EPL fixture cache CSV ...")
+    _refresh_epl_fixture_cache_csv()
 
     print(f"\n{'=' * 60}")
     print(f"  Done!  {total_new} new match(es) added across {len(leagues)} league(s).")
