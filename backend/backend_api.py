@@ -15,8 +15,13 @@ from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
 
 from backend.bet_type.double_chance.double_chance import DoubleChanceWorkspace
 from backend.bet_type.corners.corners import CornerWorkspace
@@ -86,6 +91,15 @@ UNDERSTAT_MATCH_ID_OFFSET_BY_LEAGUE: dict[str, int] = {
     "italy_serie_a": 7_300_000_000,
     "france_ligue_1": 7_400_000_000,
 }
+SIMILAR_TEAMS_MODE_OFF = "off"
+SIMILAR_TEAMS_MODE_PCA_CLUSTER = "pca_cluster"
+SIMILAR_TEAMS_DEFAULT_LIMIT = 8
+SIMILAR_TEAMS_MIN_MATCHES = 5
+SIMILAR_TEAMS_MIN_K = 2
+SIMILAR_TEAMS_MAX_K = 8
+SIMILAR_TEAMS_MIN_CLUSTER_SIZE = 2
+SIMILAR_TEAMS_MAX_CLUSTER_SHARE = 0.8
+SIMILAR_TEAMS_PCA_EXPLAINED_VARIANCE = 0.9
 
 TEAM_NAME_ALIASES = {
     "mancity": "manchestercity",
@@ -1403,6 +1417,269 @@ def _apply_opponent_rank_filters(
     return filtered_df
 
 
+def _is_similar_teams_filter_enabled(filters_payload: dict[str, Any]) -> bool:
+    if not isinstance(filters_payload, dict):
+        return False
+
+    explicit_flag = filters_payload.get("similar_teams")
+    if isinstance(explicit_flag, bool):
+        return explicit_flag
+    if isinstance(explicit_flag, str):
+        explicit_text = explicit_flag.strip().lower()
+        if explicit_text in {"1", "true", "yes", "on"}:
+            return True
+        if explicit_text in {"0", "false", "no", "off"}:
+            return False
+
+    mode = str(filters_payload.get("similar_teams_mode", SIMILAR_TEAMS_MODE_OFF) or "").strip().lower()
+    return mode in {"similar", "pca", SIMILAR_TEAMS_MODE_PCA_CLUSTER, "true", "1", "on"}
+
+
+def _select_similarity_k(x_pca: np.ndarray) -> int:
+    n_teams = int(len(x_pca))
+    if n_teams <= 1:
+        return 1
+
+    low = max(SIMILAR_TEAMS_MIN_K, 2)
+    high = min(SIMILAR_TEAMS_MAX_K, n_teams - 1)
+    if high < low:
+        return 2 if n_teams >= 2 else 1
+
+    best_any: tuple[float, int] | None = None
+    best_any_k = low
+    best_valid: tuple[float, int] | None = None
+    best_valid_k = low
+
+    for k in range(low, high + 1):
+        model = KMeans(n_clusters=int(k), random_state=42, n_init=25)
+        labels = model.fit_predict(x_pca)
+        counts = np.bincount(labels, minlength=k)
+        min_size_observed = int(counts.min()) if len(counts) else 0
+        max_share_observed = float(counts.max() / n_teams) if len(counts) else 1.0
+        valid = bool(
+            min_size_observed >= SIMILAR_TEAMS_MIN_CLUSTER_SIZE
+            and max_share_observed <= SIMILAR_TEAMS_MAX_CLUSTER_SHARE
+        )
+        score = float("-inf")
+        if n_teams > k:
+            try:
+                score = float(silhouette_score(x_pca, labels))
+            except Exception:
+                score = float("-inf")
+        sort_key = (score, -k)
+
+        if best_any is None or sort_key > best_any:
+            best_any = sort_key
+            best_any_k = int(k)
+        if valid and (best_valid is None or sort_key > best_valid):
+            best_valid = sort_key
+            best_valid_k = int(k)
+
+    return best_valid_k if best_valid is not None else best_any_k
+
+
+@lru_cache(maxsize=1)
+def _global_team_similarity_index() -> dict[str, Any]:
+    empty = {
+        "frame": pd.DataFrame(),
+        "k_effective": 0,
+        "pca_components": 0,
+        "pca_explained_variance": 0.0,
+        "features_used": [],
+    }
+
+    try:
+        from backend.team_clustering import FEATURE_BASE_COLUMNS, _discover_league_datasets, build_team_feature_frame
+    except Exception:
+        return empty
+
+    datasets = _discover_league_datasets()
+    if not datasets:
+        return empty
+
+    team_frames: list[pd.DataFrame] = []
+    for dataset in datasets:
+        team_df = build_team_feature_frame(dataset.season_df, min_matches=SIMILAR_TEAMS_MIN_MATCHES)
+        if team_df.empty:
+            continue
+        team_df = team_df.copy()
+        team_df.insert(0, "league_slug", dataset.league_slug)
+        team_df.insert(1, "league_name", dataset.league_name)
+        team_frames.append(team_df)
+
+    if not team_frames:
+        return empty
+
+    combined = pd.concat(team_frames, ignore_index=True)
+    feature_cols = [
+        column for column in FEATURE_BASE_COLUMNS if column in combined.columns and combined[column].notna().any()
+    ]
+    if not feature_cols:
+        return empty
+
+    matrix = combined[feature_cols].apply(pd.to_numeric, errors="coerce")
+    matrix = matrix.fillna(matrix.median(axis=0, numeric_only=True)).fillna(0.0)
+    std_by_feature = matrix.std(axis=0, ddof=0)
+    kept_features = [column for column in feature_cols if float(std_by_feature.get(column, 0.0)) > 1e-6]
+    if not kept_features:
+        kept_features = feature_cols
+
+    x_raw = matrix[kept_features].to_numpy(dtype=float, copy=True)
+    if x_raw.size == 0:
+        return empty
+
+    scaler = StandardScaler()
+    x_scaled = scaler.fit_transform(x_raw)
+
+    pca_explained_variance = 1.0
+    x_projected = x_scaled
+    if x_scaled.shape[0] > 1 and x_scaled.shape[1] > 1:
+        try:
+            pca = PCA(n_components=SIMILAR_TEAMS_PCA_EXPLAINED_VARIANCE, svd_solver="full")
+            x_projected = pca.fit_transform(x_scaled)
+            pca_explained_variance = float(np.sum(pca.explained_variance_ratio_))
+            if x_projected.ndim == 1:
+                x_projected = x_projected.reshape(-1, 1)
+        except Exception:
+            x_projected = x_scaled
+            pca_explained_variance = 1.0
+
+    k_effective = _select_similarity_k(x_projected)
+    if k_effective <= 1:
+        labels = np.zeros(len(combined), dtype=int)
+    else:
+        labels = KMeans(n_clusters=int(k_effective), random_state=42, n_init=25).fit_predict(x_projected)
+
+    pc_columns = [f"pc_{idx + 1}" for idx in range(x_projected.shape[1])]
+    similarity_frame = combined[["league_slug", "league_name", "team"]].copy()
+    similarity_frame["team_norm"] = similarity_frame["team"].astype(str).map(_normalize_team_name)
+    similarity_frame["cluster_id"] = labels.astype(int)
+    similarity_frame["cluster_size"] = similarity_frame["cluster_id"].map(
+        similarity_frame["cluster_id"].value_counts().to_dict()
+    )
+    for idx, column in enumerate(pc_columns):
+        similarity_frame[column] = x_projected[:, idx]
+
+    return {
+        "frame": similarity_frame,
+        "k_effective": int(k_effective),
+        "pca_components": int(x_projected.shape[1]),
+        "pca_explained_variance": float(pca_explained_variance),
+        "features_used": kept_features,
+    }
+
+
+def _resolve_similar_team_norms(
+    anchor_team_name: str,
+    max_similar_teams: int = SIMILAR_TEAMS_DEFAULT_LIMIT,
+) -> tuple[set[str], dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "anchor_team_norm": "",
+        "cluster_id": None,
+        "cluster_pool_size": 0,
+        "selected_count": 0,
+        "k_effective": 0,
+        "pca_components": 0,
+        "pca_explained_variance": 0.0,
+    }
+
+    similarity_index = _global_team_similarity_index()
+    frame = similarity_index.get("frame")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return set(), metadata
+
+    anchor_norm = _normalize_team_name(anchor_team_name)
+    metadata["anchor_team_norm"] = anchor_norm
+    if not anchor_norm:
+        return set(), metadata
+
+    anchor_candidates = frame[frame["team_norm"] == anchor_norm]
+    if anchor_candidates.empty:
+        return set(), metadata
+
+    metadata["k_effective"] = int(similarity_index.get("k_effective", 0))
+    metadata["pca_components"] = int(similarity_index.get("pca_components", 0))
+    metadata["pca_explained_variance"] = float(similarity_index.get("pca_explained_variance", 0.0))
+
+    anchor_row = anchor_candidates.iloc[0]
+    cluster_id = int(anchor_row["cluster_id"])
+    metadata["cluster_id"] = cluster_id
+
+    cluster_rows = frame[frame["cluster_id"] == cluster_id].copy()
+    metadata["cluster_pool_size"] = int(len(cluster_rows))
+    if cluster_rows.empty:
+        return {anchor_norm}, metadata
+
+    pc_columns = [column for column in cluster_rows.columns if column.startswith("pc_")]
+    if pc_columns:
+        cluster_vectors = cluster_rows[pc_columns].to_numpy(dtype=float)
+        anchor_vector = anchor_row[pc_columns].to_numpy(dtype=float)
+        distances = np.linalg.norm(cluster_vectors - anchor_vector, axis=1)
+        cluster_rows["distance_to_anchor"] = distances
+        cluster_rows = cluster_rows.sort_values(
+            by=["distance_to_anchor", "team_norm"],
+            kind="mergesort",
+        )
+    else:
+        cluster_rows = cluster_rows.sort_values(by=["team_norm"], kind="mergesort")
+
+    limit = _safe_int(max_similar_teams, SIMILAR_TEAMS_DEFAULT_LIMIT)
+    limit = max(1, min(30, limit))
+    selected = cluster_rows.head(limit)
+    similar_norms = {str(value) for value in selected["team_norm"].dropna().tolist()}
+    similar_norms.add(anchor_norm)
+    metadata["selected_count"] = int(len(similar_norms))
+    return similar_norms, metadata
+
+
+def _apply_similar_teams_filter(
+    df: pd.DataFrame,
+    filters_payload: dict[str, Any],
+    anchor_opponent_team_name: str | None,
+    notes: list[str] | None = None,
+    side_label: str = "team",
+) -> pd.DataFrame:
+    if df.empty or not isinstance(filters_payload, dict):
+        return df
+    if not _is_similar_teams_filter_enabled(filters_payload):
+        return df
+
+    anchor_name = str(anchor_opponent_team_name or "").strip()
+    if not anchor_name:
+        if notes is not None:
+            notes.append(f"{side_label}_similar_teams_skipped=no_anchor_team")
+        return df
+
+    similar_limit = _safe_int(filters_payload.get("similar_teams_limit"), SIMILAR_TEAMS_DEFAULT_LIMIT)
+    similar_team_norms, metadata = _resolve_similar_team_norms(
+        anchor_name,
+        max_similar_teams=similar_limit,
+    )
+    if not similar_team_norms:
+        if notes is not None:
+            notes.append(f"{side_label}_similar_teams_skipped=no_similarity_index")
+        return df
+
+    match_lookup = _match_name_index()
+    opponent_names = df.apply(lambda row: _resolve_opponent_team_name_from_row(row, match_lookup), axis=1)
+    opponent_norm = opponent_names.map(_normalize_team_name)
+
+    before_count = int(len(df))
+    filtered_df = df.loc[opponent_norm.isin(similar_team_norms).fillna(False)]
+    after_count = int(len(filtered_df))
+
+    if notes is not None:
+        notes.append(
+            f"{side_label}_similar_teams={SIMILAR_TEAMS_MODE_PCA_CLUSTER}:"
+            f"anchor={metadata.get('anchor_team_norm')},cluster={metadata.get('cluster_id')},"
+            f"selected={metadata.get('selected_count')},k={metadata.get('k_effective')},"
+            f"pca_var={float(metadata.get('pca_explained_variance', 0.0)):.3f}:"
+            f"{before_count}->{after_count}"
+        )
+
+    return filtered_df
+
+
 def _build_match_datetime_index_from_df(df: pd.DataFrame) -> dict[int, pd.Timestamp]:
     if df.empty:
         return {}
@@ -2446,6 +2723,20 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_result_counts(home_df)
         away_metrics = _split_result_counts(away_df)
@@ -2600,6 +2891,20 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_over_under_counts(home_df, line)
         away_metrics = _split_over_under_counts(away_df, line)
@@ -2737,6 +3042,20 @@ def create_app() -> Flask:
             away_df,
             ranking_filters_payload,
             league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
             notes=notes,
             side_label="away",
         )
@@ -2882,6 +3201,20 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
 
         home_metrics = _split_btts_counts(home_df)
         away_metrics = _split_btts_counts(away_df)
@@ -2946,6 +3279,7 @@ def create_app() -> Flask:
         home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
         home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
         requested_league_id = str(payload.get("league_id", "") or "").strip()
         league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
         if home_team_id < 0 or away_team_id < 0:
@@ -2996,6 +3330,13 @@ def create_app() -> Flask:
             home_df,
             ranking_filters_payload,
             league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
             notes=notes,
             side_label="home",
         )
@@ -3066,6 +3407,7 @@ def create_app() -> Flask:
 
         home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
         away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
         away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
         requested_league_id = str(payload.get("league_id", "") or "").strip()
         league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
@@ -3117,6 +3459,13 @@ def create_app() -> Flask:
             away_df,
             ranking_filters_payload,
             league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
             notes=notes,
             side_label="away",
         )
@@ -3264,6 +3613,20 @@ def create_app() -> Flask:
             away_df,
             ranking_filters_payload,
             league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
             notes=notes,
             side_label="away",
         )

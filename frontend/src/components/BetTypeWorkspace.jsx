@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import api from '../api/backendApi'
 import FilterDropdown from './FilterDropdown'
 import ChartArea from './ChartArea'
@@ -31,6 +32,7 @@ function defaultTeamViewForBetType(betType) {
 function createDefaultFilters() {
   return {
     home_away: 'all',
+    h2h: false,
     team_momentum_range: [0, 10],
     opponent_momentum_range: [0, 10],
     total_match_goals_range: [0, 10],
@@ -48,6 +50,7 @@ function createDefaultFilters() {
     opponent_rank_corners_range: [1, 20],
     opponent_rank_momentum_range: [1, 20],
     opponent_rank_possession_range: [1, 20],
+    similar_teams_mode: 'off',
     shot_xg_threshold: 0.3,
     shot_xg_min_shots: 0,
   }
@@ -219,6 +222,17 @@ function buildEvidenceFilters(filters) {
     })
   }
 
+  if (filters.h2h === true) {
+    evidenceFilters.push({
+      key: 'h2h',
+      kind: 'h2h',
+      operator: '==',
+      value: true,
+      display_name: 'Head-to-Head Only',
+      required_columns: [],
+    })
+  }
+
   return evidenceFilters
 }
 
@@ -266,6 +280,7 @@ export default function BetTypeWorkspace({
   const [appliedCornersLine, setAppliedCornersLine] = useState(DEFAULT_CORNERS_LINE)
   const [chartTeamView, setChartTeamView] = useState(DEFAULT_CHART_TEAM_VIEW)
   const [isFiltersOpen, setIsFiltersOpen] = useState(false)
+  const [showGlossary, setShowGlossary] = useState(false)
   const [activeOverlayFilter, setActiveOverlayFilter] = useState(null)
   const [error, setError] = useState(null)
   const workspaceCacheRef = useRef(new Map())
@@ -443,7 +458,17 @@ export default function BetTypeWorkspace({
           {isFiltersOpen ? (
             <>
               <div className="filters-drawer-header">
-                <strong>Filters</strong>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+                  <strong>Filters</strong>
+                  <button
+                    type="button"
+                    className="filter-help-icon"
+                    aria-label="Filter glossary"
+                    onClick={() => setShowGlossary(true)}
+                  >
+                    ?
+                  </button>
+                </div>
                 <button type="button" onClick={() => setIsFiltersOpen(false)}>✕</button>
               </div>
               <FilterDropdown
@@ -456,10 +481,94 @@ export default function BetTypeWorkspace({
                 onSplitViewChange={setChartTeamView}
                 activeOverlayFilter={activeOverlayFilter}
                 onOverlayFilterChange={setActiveOverlayFilter}
+                homeTeamName={homeTeamName}
+                awayTeamName={awayTeamName}
               />
             </>
           ) : null}
         </aside>
+
+        {/* Glossary Modal */}
+        {showGlossary && createPortal(
+          <div className="glossary-backdrop" onClick={() => setShowGlossary(false)}>
+            <div className="glossary-modal" onClick={e => e.stopPropagation()}>
+              <div className="glossary-modal-header">
+                <h3>Filter Glossary</h3>
+                <button type="button" className="glossary-modal-close" onClick={() => setShowGlossary(false)}>✕</button>
+              </div>
+              <div className="glossary-modal-body">
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">How Filters Work</div>
+                  <div className="glossary-item">
+                    <span className="glossary-def">Filters narrow down the historical matches shown in the chart. Only games matching all active filters are included in the hit-rate calculation.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Season &amp; Games</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Season</span>
+                    <span className="glossary-def">Select which season's data to display. Currently only 25/26 is available.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Games</span>
+                    <span className="glossary-def">Limit the number of most-recent matches shown. Choose 10, 20, Max, or set a custom number with the stepper. The lock icon indicates a custom value is active.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Split</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Chart View</span>
+                    <span className="glossary-def">Both — shows home &amp; away in one chart. Home / Away — filters to only those venues.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Venue</span>
+                    <span className="glossary-def">Filter matches by where the team played (All, Home, or Away).</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">vs Similar Teams</span>
+                    <span className="glossary-def">Filters to opponents that are statistically similar to the upcoming opponent, based on PCA cluster analysis.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Stats Filters</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Momentum</span>
+                    <span className="glossary-def">Team's form score (0–10) in matches leading up to the game.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">xG / Opp xG</span>
+                    <span className="glossary-def">Expected goals for or against. Filters from 0–5.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Possession</span>
+                    <span className="glossary-def">Ball possession percentage for either the team or opponent (0–100%).</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Field Tilt</span>
+                    <span className="glossary-def">Attacking territory share, ranging 0–1. Higher values mean more territory in the opponent's half.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Total / Team / Opp Goals</span>
+                    <span className="glossary-def">Filter by goals scored in the match (0–10).</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Opponent Rankings</div>
+                  <div className="glossary-item">
+                    <span className="glossary-def">Filter by how the opponent ranked in the league that season for xGD, xGF, xGA, position, corners, momentum, or possession. Rank 1 = best, 20 = worst.</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
         <div className="metrics-panel-mobile-wrap">
           <MetricsPanel
             betType={workspace?.workspace?.bet_type || betType}

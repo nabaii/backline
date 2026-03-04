@@ -205,6 +205,24 @@ Observed columns:
 | `required_columns` | tuple/list of strings | no | Additional columns needed for execution |
 
 
+### 7.3 Workspace Filter Payload Additions
+
+The frontend sends a raw `filters` object alongside `evidenceFilters`. The backend now supports:
+
+1. `similar_teams_mode`: string (`off` or `pca_cluster`)
+2. `similar_teams`: boolean fallback flag (`true` enables similar-team filtering)
+3. `similar_teams_limit`: optional integer cap (default `8`) for cluster-nearest opponent set
+
+Behavior:
+
+1. When enabled, each side is filtered to matches against opponents similar to the *upcoming opponent*.
+2. Similarity is computed from a global all-leagues team model:
+   - standardized full feature set,
+   - PCA projection (target explained variance `0.9`),
+   - K-means in PCA space with auto-k and cluster balance constraints.
+3. This filter is applied after opponent-rank filters.
+
+
 ## 8) Operational Notes
 
 1. `season_df.csv` is the source of truth for analytics filtering.

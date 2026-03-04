@@ -165,3 +165,14 @@ Includes:
    - tighten `max_cluster_share`,
    - adjust `k_max`,
    - raise `min_feature_std` slightly.
+
+
+## 7) Similar Teams Filter Integration
+
+The workspace UI filter `Opponent Set -> Similar Teams (PCA Cluster)` uses the same feature family but runs a global PCA+KMeans similarity model inside `backend/backend_api.py`:
+
+1. Build team-level global frame from all leagues.
+2. Standardize all clustering features.
+3. Project into PCA space (target explained variance `0.90`).
+4. Auto-select `k` using silhouette with balance constraints.
+5. For each upcoming opponent, keep matches against teams in that opponent's PCA cluster (nearest subset).

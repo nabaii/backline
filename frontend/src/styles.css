@@ -920,9 +920,9 @@ html {
 }
 
 .filters-drawer.open {
-  width: 290px;
-  flex: 0 0 290px;
-  max-width: 290px;
+  width: 320px;
+  flex: 0 0 320px;
+  max-width: 320px;
   margin-left: 0;
   opacity: 1;
   pointer-events: auto;
@@ -976,6 +976,249 @@ html {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* ── Filter Top Rows (Season / Games) ── */
+.filter-top-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+
+.filter-top-label {
+  flex: 0 0 42px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.filter-chip-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+
+/* Season / Games preset chips */
+.filter-chip-btn {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.filter-chip-btn:hover {
+  border-color: var(--border-light);
+  color: var(--text);
+  background: var(--surface-alt);
+}
+
+.filter-chip-btn.active {
+  border-color: var(--primary);
+  background: var(--primary-dim);
+  color: var(--primary);
+  font-weight: 700;
+}
+
+/* Games custom stepper  – N + 🔒 */
+.filter-games-custom {
+  display: flex;
+  align-items: center;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  overflow: hidden;
+  transition: border-color var(--transition);
+}
+
+.filter-games-custom.active {
+  border-color: var(--primary);
+}
+
+.filter-games-step {
+  width: 22px;
+  height: 100%;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background var(--transition), color var(--transition);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.filter-games-step:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.filter-games-value {
+  min-width: 20px;
+  text-align: center;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text);
+  padding: 0 1px;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.filter-games-lock {
+  width: 22px;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  font-size: 0.68rem;
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.filter-games-custom.active .filter-games-lock {
+  color: var(--primary);
+}
+
+/* ── Help / Glossary Icon ── */
+.filter-help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border-light);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 0.65rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+  margin-left: 4px;
+  line-height: 1;
+}
+
+.filter-help-icon:hover {
+  background: var(--surface-alt);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* ── Glossary Modal ── */
+.glossary-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 500;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 60px 16px 16px;
+}
+
+.glossary-modal {
+  width: 300px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+  background: #18181d;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+}
+
+.glossary-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: #18181d;
+  z-index: 2;
+}
+
+.glossary-modal-header h3 {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.glossary-modal-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all var(--transition);
+  line-height: 1;
+}
+
+.glossary-modal-close:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.glossary-modal-body {
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.glossary-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.glossary-section-title {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--primary);
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.glossary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.glossary-term {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.glossary-def {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 
 /* ── Filter Category Tabs ── */
@@ -1085,7 +1328,7 @@ html {
   height: 28px;
   padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text-secondary);
   font-family: inherit;
@@ -1594,6 +1837,7 @@ html {
     display: block;
     order: 3;
   }
+
   /* ── Filters ── */
   .filters-toggle-btn {
     height: 28px;

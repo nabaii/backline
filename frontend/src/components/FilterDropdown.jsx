@@ -74,6 +74,18 @@ function isRangeModified(range, config) {
   return norm[0] !== def[0] || norm[1] !== def[1]
 }
 
+function clampGamesCount(rawValue) {
+  const numeric = Number(rawValue)
+  if (!Number.isFinite(numeric)) return 21
+  return Math.max(1, Math.min(60, Math.floor(numeric)))
+}
+
+function isSimilarTeamsEnabled(filters = {}) {
+  const mode = String(filters.similar_teams_mode || '').trim().toLowerCase()
+  if (mode === 'pca_cluster') return true
+  return filters.similar_teams === true
+}
+
 function DualRangeSlider({ range, config, onDraftChange, onCommit }) {
   const [minValue, maxValue] = range
   const left = toPercent(minValue, config)
@@ -142,6 +154,8 @@ export default function FilterDropdown({
   onSplitViewChange,
   activeOverlayFilter,
   onOverlayFilterChange,
+  homeTeamName,
+  awayTeamName,
 }) {
   const update = (k, v) => onChange({ ...value, [k]: v })
 
@@ -219,11 +233,112 @@ export default function FilterDropdown({
   const shotXgMinShots = Number.isFinite(Number(value.shot_xg_min_shots))
     ? Math.max(0, Math.floor(Number(value.shot_xg_min_shots)))
     : 0
+  const gamesMode = String(value.games_mode || 'max').trim().toLowerCase()
+  const gamesCount = clampGamesCount(value.games_count)
+  const similarTeamsEnabled = isSimilarTeamsEnabled(value)
 
   return (
     <div className="filter-dropdown">
+      <div className="filter-top-row">
+        <div className="filter-top-label">Season</div>
+        <div className="filter-chip-row">
+          <button
+            type="button"
+            className="filter-chip-btn active"
+            onClick={() => onChange({ ...value, season: '25/26' })}
+          >
+            25/26
+          </button>
+        </div>
+      </div>
+
+      <div className="filter-top-row">
+        <div className="filter-top-label">Games</div>
+        <div className="filter-chip-row">
+          <button
+            type="button"
+            className={`filter-chip-btn ${gamesMode === '10' ? 'active' : ''}`}
+            onClick={() => onChange({ ...value, games_mode: '10', games_count: 10 })}
+          >
+            10
+          </button>
+          <button
+            type="button"
+            className={`filter-chip-btn ${gamesMode === '20' ? 'active' : ''}`}
+            onClick={() => onChange({ ...value, games_mode: '20', games_count: 20 })}
+          >
+            20
+          </button>
+          <button
+            type="button"
+            className={`filter-chip-btn ${gamesMode === 'max' ? 'active' : ''}`}
+            onClick={() => onChange({ ...value, games_mode: 'max' })}
+          >
+            Max
+          </button>
+          <div className={`filter-games-custom ${gamesMode === 'custom' ? 'active' : ''}`}>
+            <button
+              type="button"
+              className="filter-games-step"
+              aria-label="Decrease games"
+              onClick={() => onChange({
+                ...value,
+                games_mode: 'custom',
+                games_count: clampGamesCount(gamesCount - 1),
+              })}
+            >
+              –
+            </button>
+            <span className="filter-games-value">{gamesCount}</span>
+            <button
+              type="button"
+              className="filter-games-step"
+              aria-label="Increase games"
+              onClick={() => onChange({
+                ...value,
+                games_mode: 'custom',
+                games_count: clampGamesCount(gamesCount + 1),
+              })}
+            >
+              +
+            </button>
+            <span className="filter-games-lock" aria-hidden="true">🔒</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Chart View — global, sits between Games and category tabs */}
+      {typeof onSplitViewChange === 'function' ? (
+        <div className="filter-top-row" style={{ marginTop: 2 }}>
+          <div className="filter-top-label" style={{ flex: '0 0 auto', whiteSpace: 'nowrap' }}>Chart View</div>
+          <div className="split-toggle" style={{ display: 'flex', gap: 4 }}>
+            <button
+              type="button"
+              className={`split-toggle-btn ${splitView === VIEW_BOTH ? 'active' : ''}`}
+              onClick={() => onSplitViewChange(VIEW_BOTH)}
+            >
+              Both
+            </button>
+            <button
+              type="button"
+              className={`split-toggle-btn ${splitView === VIEW_HOME ? 'active' : ''}`}
+              onClick={() => onSplitViewChange(VIEW_HOME)}
+            >
+              {homeTeamName || 'Home'}
+            </button>
+            <button
+              type="button"
+              className={`split-toggle-btn ${splitView === VIEW_AWAY ? 'active' : ''}`}
+              onClick={() => onSplitViewChange(VIEW_AWAY)}
+            >
+              {awayTeamName || 'Away'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* Category tabs */}
-      <div className="filter-category-tabs">
+      <div className="filter-category-tabs" style={{ marginTop: 6 }}>
         <button
           type="button"
           className={`filter-category-tab ${activeCategory === CATEGORY_SUGGESTED ? 'active' : ''}`}
@@ -250,90 +365,71 @@ export default function FilterDropdown({
           className={`filter-category-tab ${activeCategory === CATEGORY_OPPONENT_RANKINGS ? 'active' : ''}`}
           onClick={() => setActiveCategory(CATEGORY_OPPONENT_RANKINGS)}
         >
-          Opponent Rankings
+          Opp Rank
         </button>
       </div>
 
-      {activeCategory === CATEGORY_SUGGESTED || activeCategory === CATEGORY_SPLIT ? (
+      {/* ── Suggested tab: curated pills only ── */}
+      {activeCategory === CATEGORY_SUGGESTED ? (
         <>
-          {/* Split view toggle */}
-          {typeof onSplitViewChange === 'function' ? (
-            <div className="filter-control">
-              <label>Chart View</label>
-              <div className="split-toggle">
-                <button
-                  type="button"
-                  className={`split-toggle-btn ${splitView === VIEW_BOTH ? 'active' : ''}`}
-                  onClick={() => onSplitViewChange(VIEW_BOTH)}
-                >
-                  Both
-                </button>
-                <button
-                  type="button"
-                  className={`split-toggle-btn ${splitView === VIEW_HOME ? 'active' : ''}`}
-                  onClick={() => onSplitViewChange(VIEW_HOME)}
-                >
-                  Home
-                </button>
-                <button
-                  type="button"
-                  className={`split-toggle-btn ${splitView === VIEW_AWAY ? 'active' : ''}`}
-                  onClick={() => onSplitViewChange(VIEW_AWAY)}
-                >
-                  Away
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          {/* Venue filter */}
-          <div className="filter-control">
-            <label>Venue</label>
-            <select value={value.home_away || 'all'} onChange={e => update('home_away', e.target.value)}>
-              <option value="all">All</option>
-              <option value="home">Home</option>
-              <option value="away">Away</option>
-            </select>
-          </div>
-        </>
-      ) : null}
-
-      {activeCategory === CATEGORY_SUGGESTED || activeCategory === CATEGORY_STATS || activeCategory === CATEGORY_OPPONENT_RANKINGS ? (
-        <>
-          {/* Filter pill buttons */}
           <div className="filter-pills-grid">
-            {(activeCategory === CATEGORY_SUGGESTED
-              ? FILTER_KEYS
-              : activeCategory === CATEGORY_STATS
-                ? STATS_FILTER_KEYS
-                : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+            {/* H2H */}
+            <button
+              type="button"
+              className={`filter-pill-btn ${value.h2h ? 'active' : ''}`}
+              onClick={() => onChange({ ...value, h2h: !value.h2h })}
+            >
+              H2H
+            </button>
+            {/* Home venue */}
+            <button
+              type="button"
+              className={`filter-pill-btn ${(value.home_away || 'all') === 'home' ? 'active' : ''}`}
+              onClick={() => update('home_away', (value.home_away || 'all') === 'home' ? 'all' : 'home')}
+            >
+              Home
+            </button>
+            {/* Away venue */}
+            <button
+              type="button"
+              className={`filter-pill-btn ${(value.home_away || 'all') === 'away' ? 'active' : ''}`}
+              onClick={() => update('home_away', (value.home_away || 'all') === 'away' ? 'all' : 'away')}
+            >
+              Away
+            </button>
+            {/* vs Similar Teams */}
+            <button
+              type="button"
+              className={`filter-pill-btn ${similarTeamsEnabled ? 'active' : ''}`}
+              onClick={() => onChange({
+                ...value,
+                similar_teams_mode: similarTeamsEnabled ? 'off' : 'pca_cluster',
+                similar_teams: !similarTeamsEnabled,
+              })}
+            >
+              vs Similar Teams
+            </button>
+            {/* Opp xGD rank */}
+            {(() => {
+              const key = 'opponent_rank_xgd_range'
               const config = getRangeConfig(key)
               if (!config) return null
               const isExpanded = expandedFilters.has(key)
               const isModified = isRangeModified(value[key], config)
               const isOverlay = activeOverlayFilter === key
-              let className = 'filter-pill-btn'
-              if (isExpanded || isOverlay) className += ' active'
-              if (isModified) className += ' modified'
+              let cls = 'filter-pill-btn'
+              if (isExpanded || isOverlay) cls += ' active'
+              if (isModified) cls += ' modified'
               return (
-                <button
-                  key={key}
-                  type="button"
-                  className={className}
-                  onClick={() => toggleFilter(key)}
-                >
+                <button key={key} type="button" className={cls} onClick={() => toggleFilter(key)}>
                   {config.label}
                 </button>
               )
-            })}
+            })()}
           </div>
-
-          {/* Expandable sliders for active pills */}
-          {(activeCategory === CATEGORY_SUGGESTED
-            ? FILTER_KEYS
-            : activeCategory === CATEGORY_STATS
-              ? STATS_FILTER_KEYS
-              : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+          {/* Expandable slider for Opp xGD rank */}
+          {(() => {
+            const key = 'opponent_rank_xgd_range'
             const config = getRangeConfig(key)
             if (!config) return null
             const isExpanded = expandedFilters.has(key)
@@ -353,10 +449,110 @@ export default function FilterDropdown({
                 </div>
               </div>
             )
-          })}
+          })()}
+        </>
+      ) : null}
 
-          {/* Shot xG controls */}
-          {activeCategory !== CATEGORY_OPPONENT_RANKINGS ? (
+      {/* ── Split tab ── */}
+      {activeCategory === CATEGORY_SPLIT ? (
+        <>
+          <div className="filter-control">
+            <label>Venue</label>
+            <div className="filter-pills-grid" style={{ marginTop: 2 }}>
+              <button
+                type="button"
+                className={`filter-pill-btn ${(value.home_away || 'all') === 'home' ? 'active' : ''}`}
+                onClick={() => update('home_away', (value.home_away || 'all') === 'home' ? 'all' : 'home')}
+              >
+                Home
+              </button>
+              <button
+                type="button"
+                className={`filter-pill-btn ${(value.home_away || 'all') === 'away' ? 'active' : ''}`}
+                onClick={() => update('home_away', (value.home_away || 'all') === 'away' ? 'all' : 'away')}
+              >
+                Away
+              </button>
+            </div>
+          </div>
+          <div className="filter-pills-grid" style={{ marginTop: 4 }}>
+            <button
+              type="button"
+              className={`filter-pill-btn ${similarTeamsEnabled ? 'active' : ''}`}
+              onClick={() => onChange({
+                ...value,
+                similar_teams_mode: similarTeamsEnabled ? 'off' : 'pca_cluster',
+                similar_teams: !similarTeamsEnabled,
+              })}
+            >
+              vs Similar Teams
+            </button>
+            <button
+              type="button"
+              className={`filter-pill-btn ${value.h2h ? 'active' : ''}`}
+              onClick={() => onChange({ ...value, h2h: !value.h2h })}
+            >
+              H2H
+            </button>
+          </div>
+        </>
+      ) : null}
+
+      {/* ── Stats / Opp Rank tabs: full range pill grid ── */}
+      {activeCategory === CATEGORY_STATS || activeCategory === CATEGORY_OPPONENT_RANKINGS ? (
+        <>
+          <div className="filter-pills-grid">
+            {(activeCategory === CATEGORY_STATS
+              ? STATS_FILTER_KEYS
+              : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+                const config = getRangeConfig(key)
+                if (!config) return null
+                const isExpanded = expandedFilters.has(key)
+                const isModified = isRangeModified(value[key], config)
+                const isOverlay = activeOverlayFilter === key
+                let className = 'filter-pill-btn'
+                if (isExpanded || isOverlay) className += ' active'
+                if (isModified) className += ' modified'
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={className}
+                    onClick={() => toggleFilter(key)}
+                  >
+                    {config.label}
+                  </button>
+                )
+              })}
+          </div>
+
+          {/* Expandable sliders */}
+          {(activeCategory === CATEGORY_STATS
+            ? STATS_FILTER_KEYS
+            : OPPONENT_RANKING_FILTER_KEYS).map(key => {
+              const config = getRangeConfig(key)
+              if (!config) return null
+              const isExpanded = expandedFilters.has(key)
+              const draft = drafts[key] || defaultRangeFor(config)
+              return (
+                <div key={key} className={`filter-slider-section ${isExpanded ? 'expanded' : ''}`}>
+                  <div className="filter-slider-label">{config.label}</div>
+                  <DualRangeSlider
+                    range={draft}
+                    config={config}
+                    onDraftChange={(next) => updateDraft(key, next)}
+                    onCommit={(next) => commitRange(key, next)}
+                  />
+                  <div className="filter-slider-values">
+                    <span>{draft[0].toFixed(config.precision)}</span>
+                    <span>{draft[1].toFixed(config.precision)}</span>
+                  </div>
+                </div>
+              )
+            })}
+
+          {/* Shot xG controls (Stats only) */}
+          {activeCategory === CATEGORY_STATS ? (
             <>
               <div className="filter-control" style={{ marginTop: 4 }}>
                 <label>Shot xG Threshold</label>

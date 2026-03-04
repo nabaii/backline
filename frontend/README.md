@@ -20,3 +20,10 @@ npm run dev
 
 Open the printed localhost URL in your browser.
 The Vite dev server proxies `/api` requests to `http://localhost:5000` (see `vite.config.js`).
+
+## Design handoff
+
+Use:
+
+1. `docs/figma_handoff_workflow.md` for frame specs, component naming, and token mapping.
+2. `docs/figma_handoff_return_template.md` when sending Figma updates back for implementation.

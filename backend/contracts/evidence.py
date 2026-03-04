@@ -13,6 +13,8 @@ class EvidenceRequest():
     bet_type: str
     required_features: Optional[List[str]] = None
     time_scope: Optional[Any] = None
+    home_team_id: Optional[int] = None
+    away_team_id: Optional[int] = None
 
     def validate_self(self) -> None:
         """
