@@ -53,6 +53,8 @@ function createDefaultFilters() {
     similar_teams_mode: 'off',
     shot_xg_threshold: 0.3,
     shot_xg_min_shots: 0,
+    games_mode: 'max',
+    games_count: 21,
   }
 }
 
@@ -222,13 +224,32 @@ function buildEvidenceFilters(filters) {
     })
   }
 
+  const gamesMode = String(filters.games_mode || 'max').trim().toLowerCase()
+  if (gamesMode !== 'max') {
+    const count = gamesMode === 'custom'
+      ? Math.max(1, Math.min(60, Math.floor(Number(filters.games_count) || 21)))
+      : Number(gamesMode)
+    if (Number.isFinite(count) && count > 0) {
+      evidenceFilters.push({
+        key: 'last_n_games',
+        kind: 'context',
+        field: null,
+        operator: '<=',
+        value: count,
+        display_name: 'Last N Games',
+        required_columns: [],
+      })
+    }
+  }
+
   if (filters.h2h === true) {
     evidenceFilters.push({
-      key: 'h2h',
-      kind: 'h2h',
+      key: 'head_to_head',
+      kind: 'context',
+      field: null,
       operator: '==',
       value: true,
-      display_name: 'Head-to-Head Only',
+      display_name: 'Head-To-Head',
       required_columns: [],
     })
   }

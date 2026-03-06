@@ -108,6 +108,8 @@ class CornerWorkspace(CornersWorkspaceContract):
         filters: list[FilterSpec],
         perspective: Literal["home", "away"],
         line: float = None,
+        home_team_id: int = None,
+        away_team_id: int = None,
     ) -> EvidenceSubsetImpl:
         self.validate_filters(filters)
 
@@ -120,6 +122,8 @@ class CornerWorkspace(CornersWorkspaceContract):
             perspective=perspective,
             filters=filters,
             required_features=["total_corners", "home_corners", "away_corners"],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         )
         evidence = self.store.query(request)
         return self._enrich_with_corners_outcome(evidence, line)

@@ -119,7 +119,9 @@ class DoubleChanceWorkspace(BetTypeWorkspace):
         match_id: str,
         bet_type: str,
         filters: List[FilterSpec],
-        perspective: Literal['home', 'away']
+        perspective: Literal['home', 'away'],
+        home_team_id: int = None,
+        away_team_id: int = None,
     ) -> EvidenceSubsetImpl:
         """
         Builds an evidence request and delegates execution to analytics store.
@@ -132,7 +134,9 @@ class DoubleChanceWorkspace(BetTypeWorkspace):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["goals_scored", "opponent_goals"]
+            required_features=["goals_scored", "opponent_goals"],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         )
 
         evidence = self.store.query(request)

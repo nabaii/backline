@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
@@ -57,7 +57,7 @@ LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
 
-# â”€â”€ Multi-league registry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€ Multi-league registry â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 LEAGUE_REGISTRY: list[dict[str, str]] = [
     {"id": "england_premier_league",  "name": "Premier League",  "country": "ENG", "flag": "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"},
     {"id": "spain_la_liga",           "name": "La Liga",         "country": "ESP", "flag": "\U0001F1EA\U0001F1F8"},
@@ -2685,6 +2685,8 @@ def create_app() -> Flask:
                     bet_type="one_x_two",
                     filters=filters,
                     perspective=home_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = home_evidence.df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -2698,6 +2700,8 @@ def create_app() -> Flask:
                     bet_type="one_x_two",
                     filters=filters,
                     perspective=away_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = away_evidence.df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -2852,6 +2856,8 @@ def create_app() -> Flask:
                     filters=filters,
                     perspective=home_perspective,
                     line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = home_evidence.df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -2866,6 +2872,8 @@ def create_app() -> Flask:
                     filters=filters,
                     perspective=away_perspective,
                     line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = away_evidence.df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -3007,6 +3015,8 @@ def create_app() -> Flask:
                     bet_type="double_chance",
                     filters=filters,
                     perspective=home_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = home_evidence.df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -3020,6 +3030,8 @@ def create_app() -> Flask:
                     bet_type="double_chance",
                     filters=filters,
                     perspective=away_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = away_evidence.df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -3162,6 +3174,8 @@ def create_app() -> Flask:
                     perspective=home_perspective,
                     filters=filters,
                     required_features=["goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = store.query(home_request).df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -3176,6 +3190,8 @@ def create_app() -> Flask:
                     perspective=away_perspective,
                     filters=filters,
                     required_features=["goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = store.query(away_request).df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -3315,6 +3331,8 @@ def create_app() -> Flask:
                     perspective=home_perspective,
                     filters=filters,
                     required_features=["goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = store.query(home_request).df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -3444,6 +3462,8 @@ def create_app() -> Flask:
                     perspective=away_perspective,
                     filters=filters,
                     required_features=["goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = store.query(away_request).df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -3577,6 +3597,8 @@ def create_app() -> Flask:
                     filters=filters,
                     perspective=home_perspective,
                     line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 home_df = home_evidence.df
                 notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
@@ -3591,6 +3613,8 @@ def create_app() -> Flask:
                     filters=filters,
                     perspective=away_perspective,
                     line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
                 )
                 away_df = away_evidence.df
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
@@ -3676,7 +3700,147 @@ def create_app() -> Flask:
         }
         return jsonify(response)
 
-    # â”€â”€ Serve frontend SPA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── RAG query endpoint ──────────────────────────────────────────────────────
+    _rag_pipeline: Any = None  # lazy-init on first request
+
+    @app.route("/api/rag/ingest", methods=["POST"])
+    def rag_ingest():
+        """
+        Ingest all CSV rows into the ChromaDB vector store.
+        Call this once after new data arrives. Idempotent (upsert).
+        """
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+
+        try:
+            df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+            rows = df.to_dict("records")
+            docs = build_documents(rows)
+
+            store = MatchVectorStore()
+            count = store.ingest(docs)
+            return jsonify({"status": "ok", "ingested": count, "total_in_store": store.count})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/rag/query", methods=["POST", "OPTIONS"])
+    def rag_query():
+        """
+        Natural-language query against match history.
+
+        Body (JSON):
+            query         str   required  — the user's question
+            home_team_id  str   optional  — focus on matches involving this team
+            away_team_id  str   optional  — focus on matches involving this team
+            n_results     int   optional  — number of docs to retrieve (default 12)
+            extra_context str   optional  — additional text prepended to the prompt
+        """
+        nonlocal _rag_pipeline
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+        from backend.rag.rag_pipeline import RAGPipeline, RAGRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        # Lazy-init: build store + pipeline on first call
+        if _rag_pipeline is None:
+            store = MatchVectorStore()
+            if store.count == 0:
+                # Auto-ingest on first query if store is empty
+                try:
+                    df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+                    docs = build_documents(df.to_dict("records"))
+                    store.ingest(docs)
+                except Exception as exc:
+                    return jsonify({"error": f"Auto-ingest failed: {exc}"}), 500
+            _rag_pipeline = RAGPipeline(vector_store=store)
+
+        rag_request = RAGRequest(
+            query=query_text,
+            home_team_id=body.get("home_team_id") or None,
+            away_team_id=body.get("away_team_id") or None,
+            n_results=int(body.get("n_results", 12)),
+            extra_context=body.get("extra_context", ""),
+        )
+
+        try:
+            result = _rag_pipeline.run(rag_request)
+            return jsonify({
+                "answer": result.answer,
+                "match_count": result.match_count,
+                "matches": [
+                    {"id": m["id"], "metadata": m["metadata"]}
+                    for m in result.retrieved_matches
+                ],
+            })
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    # â"€â"€ Serve frontend SPA â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+    @app.route("/api/rag/stream", methods=["POST", "OPTIONS"])
+    def rag_stream():
+        """
+        Same as /api/rag/query but streams Claude response as plain text chunks.
+        The client reads the response body progressively via fetch + ReadableStream.
+        """
+        nonlocal _rag_pipeline
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+        from backend.rag.rag_pipeline import RAGPipeline, RAGRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        if _rag_pipeline is None:
+            store = MatchVectorStore()
+            if store.count == 0:
+                try:
+                    df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+                    docs = build_documents(df.to_dict("records"))
+                    store.ingest(docs)
+                except Exception as exc:
+                    return jsonify({"error": f"Auto-ingest failed: {exc}"}), 500
+            _rag_pipeline = RAGPipeline(vector_store=store)
+
+        rag_request = RAGRequest(
+            query=query_text,
+            home_team_id=body.get("home_team_id") or None,
+            away_team_id=body.get("away_team_id") or None,
+            n_results=int(body.get("n_results", 12)),
+            extra_context=body.get("extra_context", ""),
+        )
+
+        pipeline = _rag_pipeline
+
+        def generate():
+            try:
+                for chunk in pipeline.stream(rag_request):
+                    yield chunk
+            except Exception as exc:
+                yield f"
+
+[Error: {exc}]"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/plain",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def serve_frontend(path):

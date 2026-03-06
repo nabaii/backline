@@ -136,21 +136,25 @@ class OneXTwoWorkspace(BetTypeWorkspace):
                 )
 
     def get_evidence(
-            self, 
-            match_id: str, 
-            bet_type: str, 
-            filters: List[FilterSpec], 
-            perspective: Literal['home', 'away']
+            self,
+            match_id: str,
+            bet_type: str,
+            filters: List[FilterSpec],
+            perspective: Literal['home', 'away'],
+            home_team_id: int = None,
+            away_team_id: int = None,
         ) -> EvidenceSubsetImpl:
         """
         Builds an evidence request and delegates execution to analytics store.
         Enriches the resulting evidence with 1x2 outcome column.
-        
+
         Args:
             match_id: The match to get evidence for
             bet_type: Type of bet (should be 'one_x_two')
             filters: Filters to apply to the evidence
             perspective: Either 'home' or 'away'
+            home_team_id: Home team ID of the upcoming fixture (for H2H)
+            away_team_id: Away team ID of the upcoming fixture (for H2H)
         """
         self.validate_filters(filters)
 
@@ -159,7 +163,9 @@ class OneXTwoWorkspace(BetTypeWorkspace):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["goals_scored", "opponent_goals"]
+            required_features=["goals_scored", "opponent_goals"],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         )
 
         evidence = self.store.query(request)

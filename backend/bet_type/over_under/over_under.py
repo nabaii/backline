@@ -123,26 +123,30 @@ class OverUnderWorkspace(BetTypeWorkspace):
                 )       
 
     def get_evidence(
-            self, 
-            match_id: str, 
-            bet_type: str, 
-            filters: List[FilterSpec], 
+            self,
+            match_id: str,
+            bet_type: str,
+            filters: List[FilterSpec],
             perspective: Literal['home', 'away'],
-            line: float = None
+            line: float = None,
+            home_team_id: int = None,
+            away_team_id: int = None,
         ) -> EvidenceSubsetImpl:
         """
         Builds an evidence request and delegates execution to analytics store.
         Enriches the resulting evidence with over_under outcome column.
-        
+
         Args:
             match_id: The match to get evidence for
             bet_type: Type of bet (should be 'over_under')
             filters: Filters to apply to the evidence
             perspective: Either 'home' or 'away'
             line: The over/under line (default: 2.5 goals)
+            home_team_id: Home team ID of the upcoming fixture (for H2H)
+            away_team_id: Away team ID of the upcoming fixture (for H2H)
         """
         self.validate_filters(filters)
-        
+
         if line is None:
             line = self.DEFAULT_OVER_UNDER_LINE
 
@@ -151,7 +155,9 @@ class OverUnderWorkspace(BetTypeWorkspace):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["total_goals"]
+            required_features=["total_goals"],
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
         )
 
         evidence = self.store.query(request)

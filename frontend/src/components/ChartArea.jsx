@@ -27,10 +27,10 @@ const CORNERS_LINE_MAX = 20.5
 const CORNERS_LINE_STEP = 0.5
 const Y_AXIS_STEP = 0.5
 const Y_AXIS_BASE_TICK_COUNT = 4
-const CHART_HEIGHT = 330
-const CHART_HEIGHT_MOBILE = 260
-const CHART_MARGIN_DESKTOP = { top: 12, right: 10, left: 4, bottom: 44 }
-const CHART_MARGIN_MOBILE = { top: 12, right: 8, left: 2, bottom: 44 }
+const CHART_HEIGHT = 380
+const CHART_HEIGHT_MOBILE = 300
+const CHART_MARGIN_DESKTOP = { top: 18, right: 10, left: 4, bottom: 30 }
+const CHART_MARGIN_MOBILE = { top: 16, right: 8, left: 2, bottom: 28 }
 const X_AXIS_HEIGHT = 74
 const X_AXIS_PADDING_DESKTOP = 14
 const X_AXIS_PADDING_MOBILE = 8
@@ -717,7 +717,7 @@ function TeamBarChart({
   const referenceLineValue = isLineType ? line : (!isDoubleChance && !isBtts ? 0.5 : null)
   const rawDomainMax = isLineType
     ? Math.max(rawSeriesMax, line, isCorners ? CORNERS_LINE_MIN : OVER_UNDER_LINE_MIN)
-    : 1.5
+    : Math.max(rawSeriesMax, 1) * 1.08
   const { ticks: yAxisTicks, axisMax: yAxisMax } = buildYAxisScale({
     min: 0,
     max: rawDomainMax,

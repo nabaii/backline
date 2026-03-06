@@ -5,6 +5,7 @@ import LeagueSelector from './LeagueSelector'
 import FixtureList from './FixtureList'
 import BetTypeWorkspace from './BetTypeWorkspace'
 import WorkspaceLoadingPlaceholder from './WorkspaceLoadingPlaceholder'
+import ChatWindow from './ChatWindow'
 
 function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
   const menuRef = useRef(null)
@@ -50,6 +51,7 @@ function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
 }
 
 export default function KitchenPage() {
+  const [activeTab, setActiveTab] = useState('main')
   const [leagues, setLeagues] = useState([])
   const [selectedLeague, setSelectedLeague] = useState(null)
   const [fixtures, setFixtures] = useState([])
@@ -154,11 +156,26 @@ export default function KitchenPage() {
   return (
     <div className="kitchen-page">
       <header className="kitchen-header">
-        <div className="brand-block">
-          <h1>Backline</h1>
-          <p>Football Analytics Workspace</p>
+        <div className="kitchen-header-top">
+          <div className="brand-block">
+            <h1>Backline</h1>
+          </div>
+          <nav className="page-tabs" aria-label="Pages">
+            <button
+              className={`page-tab${activeTab === 'main' ? ' page-tab--active' : ''}`}
+              onClick={() => setActiveTab('main')}
+            >
+              Main
+            </button>
+            <button
+              className={`page-tab${activeTab === 'kitchen' ? ' page-tab--active' : ''}`}
+              onClick={() => setActiveTab('kitchen')}
+            >
+              Kitchen
+            </button>
+          </nav>
+          <LeagueSelector leagues={leagues} value={selectedLeague} onChange={setSelectedLeague} />
         </div>
-        <LeagueSelector leagues={leagues} value={selectedLeague} onChange={setSelectedLeague} />
       </header>
 
       <div className="kitchen-body">
@@ -167,7 +184,9 @@ export default function KitchenPage() {
         </aside>
 
         <main className="workspace-pane">
-          {error ? (
+          {activeTab === 'main' ? (
+            <ChatWindow selectedFixture={selectedFixture} />
+          ) : error ? (
             <div className="workspace-error">
               <strong>Could not load match workspace.</strong>
               <div>{error}</div>

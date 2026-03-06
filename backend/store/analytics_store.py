@@ -315,18 +315,29 @@ class AnalyticsStore(AnalyticsStoreContract):
         return df.copy()
 
     def _apply_head_to_head_filter(self, df: pd.DataFrame, request: EvidenceRequest) -> pd.DataFrame:
-        """Filter to head-to-head matches between two teams."""
-        match_row = df[df['match_id'] == request.match_id]
-        if match_row.empty:
+        """Filter to only matches where the opponent is the same as the upcoming fixture."""
+        if df.empty or 'team_id' not in df.columns:
             return df.copy()
-        
-        home_team = match_row['home_team_id'].iloc[0]
-        away_team = match_row['away_team_id'].iloc[0]
-        
+
+        # The analyzed team is in every row as team_id.
+        # The opponent is whichever fixture team is NOT the analyzed team.
+        team_id = df['team_id'].iloc[0]
+        fixture_home = request.home_team_id
+        fixture_away = request.away_team_id
+
+        if fixture_home is not None and fixture_away is not None:
+            # Determine the opponent: whichever fixture team isn't the analyzed team
+            if str(fixture_home) == str(team_id):
+                opponent = str(fixture_away)
+            else:
+                opponent = str(fixture_home)
+        else:
+            return df.copy()
+
+        # Keep rows where the opponent appears as either home or away team
         return df[
-            ((df['home_team_id'] == home_team) & (df['away_team_id'] == away_team))
-            | 
-            ((df['home_team_id'] == away_team) & (df['away_team_id'] == home_team))
+            (df['home_team_id'].astype(str) == opponent)
+            | (df['away_team_id'].astype(str) == opponent)
         ]
     
     def apply_filters(
@@ -402,16 +413,7 @@ class AnalyticsStore(AnalyticsStoreContract):
                 raise ValueError(f"Invalid filter spec: {spec} -> {e}")
 
             if spec.key == 'head_to_head':
-                match_row = filtered_df[filtered_df['match_id'] == request.match_id]
-                if not match_row.empty:
-                    home_team = match_row['home_team_id'].iloc[0]
-                    away_team = match_row['away_team_id'].iloc[0]
-
-                    filtered_df = filtered_df[
-                        ((filtered_df['home_team_id'] == home_team) & (filtered_df['away_team_id'] == away_team))
-                        |
-                        ((filtered_df['home_team_id'] == away_team) & (filtered_df['away_team_id'] == home_team))
-                    ]
+                filtered_df = self._apply_head_to_head_filter(filtered_df, request)
 
             if spec.key == "last_n_games":
                 length = spec.value

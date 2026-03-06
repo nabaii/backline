@@ -91,16 +91,20 @@ html {
 
 /* ── Header / Navbar ── */
 .kitchen-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 18px;
-  padding: 18px 24px;
   background: #111114;
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
+  padding: 14px 24px 0;
+}
+
+.kitchen-header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 14px;
 }
 
 .brand-block h1 {
@@ -113,6 +117,42 @@ html {
 
 .brand-block p {
   display: none;
+}
+
+/* ── Page Tabs (Main / Kitchen) ── */
+.page-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.page-tab {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 6px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition);
+  line-height: 1;
+}
+
+.page-tab:hover {
+  color: var(--text);
+}
+
+.page-tab--active {
+  background: var(--surface-elev);
+  color: var(--primary);
+  font-weight: 600;
 }
 
 .league-tabs {
@@ -747,13 +787,13 @@ html {
 
 /* ── Chart Body ── */
 .pm-chart-body {
-  padding: 12px;
+  padding: 10px 12px 0;
   font-family: 'Aldrich', sans-serif;
 }
 
 .pm-chart-canvas {
   position: relative;
-  height: 330px;
+  height: 380px;
 }
 
 .ou-line-paddle {
@@ -827,8 +867,8 @@ html {
   align-items: center;
   justify-content: center;
   gap: 16px;
-  margin-top: 8px;
-  padding: 6px 0;
+  margin-top: 0;
+  padding: 2px 0 14px;
 }
 
 .chart-legend-item {
@@ -1568,6 +1608,208 @@ html {
   }
 }
 
+/* ── Chat Window ── */
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: calc(100vh - var(--header-height) - var(--content-gap));
+}
+
+.chat-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 24px;
+}
+
+.chat-greeting {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.chat-greeting-star {
+  font-size: 2rem;
+  color: var(--primary);
+  line-height: 1;
+}
+
+.chat-greeting-text {
+  margin: 0;
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.chat-fixture-hint {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.chat-fixture-hint strong {
+  color: var(--text);
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-message {
+  max-width: 680px;
+  padding: 12px 16px;
+  border-radius: var(--radius-lg);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.chat-message--user {
+  align-self: flex-end;
+  background: var(--surface-elev);
+  border: 1px solid var(--border-light);
+  color: var(--text);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+}
+
+.chat-message--assistant {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) var(--radius-sm);
+}
+
+.chat-input-wrap {
+  padding: 16px 24px 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.chat-input-box {
+  width: 100%;
+  max-width: 680px;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.chat-input-box:focus-within {
+  border-color: var(--border-light);
+  box-shadow: 0 0 0 3px rgba(248, 198, 41, 0.08);
+}
+
+.chat-textarea {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  padding: 14px 16px 8px;
+  resize: none;
+  outline: none;
+  width: 100%;
+  min-height: 52px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.chat-textarea::placeholder {
+  color: var(--muted);
+}
+
+.chat-input-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px 10px 16px;
+  gap: 8px;
+}
+
+.chat-input-context {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-send-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: var(--primary);
+  color: #111114;
+  font-size: 1rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: opacity var(--transition), transform var(--transition);
+  line-height: 1;
+}
+
+.chat-send-btn:hover:not(:disabled) {
+  opacity: 0.88;
+  transform: scale(1.05);
+}
+
+.chat-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.chat-send-spinner {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(17, 17, 20, 0.3);
+  border-top-color: #111114;
+  border-radius: 50%;
+  animation: chat-spin 0.7s linear infinite;
+}
+
+@keyframes chat-spin {
+  to { transform: rotate(360deg); }
+}
+
+.chat-typing-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--primary);
+  border-radius: 1px;
+  vertical-align: text-bottom;
+  animation: chat-blink 0.9s steps(1) infinite;
+}
+
+@keyframes chat-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+.chat-message--error {
+  color: #f5a5a0;
+  border-color: var(--danger-dim);
+  background: rgba(231, 76, 60, 0.08);
+}
+
 /* ── Responsive ── */
 @media (max-width:1100px) {
   .kitchen-body {
@@ -1628,14 +1870,33 @@ html {
 
   /* ── Header ── */
   .kitchen-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-    padding: 10px 12px;
+    padding: 10px 12px 0;
+  }
+
+  .kitchen-header-top {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 10px;
   }
 
   .brand-block h1 {
     font-size: 1.25rem;
+  }
+
+  .page-tabs {
+    order: 3;
+  }
+
+  .chat-greeting-text {
+    font-size: 1.3rem;
+  }
+
+  .chat-greeting-star {
+    font-size: 1.5rem;
+  }
+
+  .chat-input-wrap {
+    padding: 12px 12px 16px;
   }
 
   .league-tabs {
@@ -1740,7 +2001,7 @@ html {
   }
 
   .pm-chart-canvas {
-    height: 260px;
+    height: 300px;
   }
 
   .pm-chart-header {
@@ -1793,7 +2054,7 @@ html {
   }
 
   .pm-chart-body {
-    padding: 8px 4px;
+    padding: 4px 4px 0;
   }
 
   .ou-line-paddle {
@@ -1813,8 +2074,8 @@ html {
 
   .chart-legend {
     gap: 10px;
-    padding: 4px 0;
-    margin-top: 4px;
+    padding: 2px 0 4px;
+    margin-top: 0;
   }
 
   .chart-legend-item {
