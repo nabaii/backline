@@ -524,6 +524,16 @@ export default function FilterDropdown({
                   </button>
                 )
               })}
+            {/* NPG toggle (Stats only) */}
+            {activeCategory === CATEGORY_STATS ? (
+              <button
+                type="button"
+                className={`filter-pill-btn ${value.npg_toggle ? 'active' : ''}`}
+                onClick={() => onChange({ ...value, npg_toggle: !value.npg_toggle })}
+              >
+                NPG
+              </button>
+            ) : null}
           </div>
 
           {/* Expandable sliders */}

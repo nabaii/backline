@@ -153,6 +153,10 @@ class MatchAnalyticsBuilder:
             # Perspective-aware goals_scored: swapped when for_perspective("away") is called
             "home_goals_scored": home_goals,  # For GoalsScored filter (home perspective)
             "away_goals_scored": away_goals,  # For GoalsScored filter (away perspective)
+            # Penalty goal counts for NPG toggle
+            "penalty_goals_home": int(match_df["penalty_goals_home"].iloc[0]) if "penalty_goals_home" in match_df.columns else 0,
+            "penalty_goals_away": int(match_df["penalty_goals_away"].iloc[0]) if "penalty_goals_away" in match_df.columns else 0,
+            "total_penalty_goals": int(match_df["total_penalty_goals"].iloc[0]) if "total_penalty_goals" in match_df.columns else 0,
         }
 
         self.feature_keys.update(available_features.keys())

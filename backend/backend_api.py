@@ -759,6 +759,36 @@ def _load_raw_df() -> pd.DataFrame:
     raw_df = pd.concat(frames, ignore_index=True)
     if "match_id" not in raw_df.columns and "game_id" in raw_df.columns:
         raw_df = raw_df.rename(columns={"game_id": "match_id"})
+
+    # Extract penalty goal counts from shot payloads for NPG support
+    for side in ("home", "away"):
+        shots_col = f"{side}_shots"
+        pg_col = f"penalty_goals_{side}"
+        if shots_col in raw_df.columns and pg_col not in raw_df.columns:
+            pen_goals = []
+            for raw in raw_df[shots_col].tolist():
+                payload = None
+                if isinstance(raw, dict):
+                    payload = raw
+                elif isinstance(raw, str):
+                    text = raw.strip()
+                    if text:
+                        try:
+                            payload = json.loads(text)
+                        except Exception:
+                            payload = None
+                pen_goals.append(
+                    int(payload.get("penalty_goals", 0)) if isinstance(payload, dict) else 0
+                )
+            raw_df[pg_col] = pen_goals
+        elif pg_col not in raw_df.columns:
+            raw_df[pg_col] = 0
+
+    raw_df["penalty_goals_home"] = pd.to_numeric(raw_df["penalty_goals_home"], errors="coerce").fillna(0).astype(int)
+    raw_df["penalty_goals_away"] = pd.to_numeric(raw_df["penalty_goals_away"], errors="coerce").fillna(0).astype(int)
+    if "total_penalty_goals" not in raw_df.columns:
+        raw_df["total_penalty_goals"] = raw_df["penalty_goals_home"] + raw_df["penalty_goals_away"]
+
     return raw_df
 
 
@@ -1777,6 +1807,44 @@ def _split_result_counts(df: pd.DataFrame) -> dict[str, int]:
     draws = int((result_series == 0.5).sum())
     losses = int((result_series == 0.1).sum())
     return {"wins": wins, "draws": draws, "losses": losses}
+
+
+def _apply_npg_adjustment(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adjust goal columns by subtracting penalty goals.
+    Returns a copy with total_goals, goals_scored, and opponent_goals reduced
+    by the corresponding penalty goal counts.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+
+    if "penalty_goals_home" in out.columns:
+        pen_home = pd.to_numeric(out["penalty_goals_home"], errors="coerce").fillna(0)
+    else:
+        pen_home = pd.Series(0, index=out.index)
+    if "penalty_goals_away" in out.columns:
+        pen_away = pd.to_numeric(out["penalty_goals_away"], errors="coerce").fillna(0)
+    else:
+        pen_away = pd.Series(0, index=out.index)
+    total_pen = pen_home + pen_away
+
+    if "total_goals" in out.columns:
+        out["total_goals"] = pd.to_numeric(out["total_goals"], errors="coerce").fillna(0) - total_pen
+
+    # For team-perspective goals (goals_scored / opponent_goals), penalty
+    # subtraction depends on which side the team is on (venue column).
+    if "goals_scored" in out.columns and "venue" in out.columns:
+        gs = pd.to_numeric(out["goals_scored"], errors="coerce").fillna(0)
+        team_pen = pen_home.where(out["venue"] == "home", pen_away)
+        out["goals_scored"] = gs - team_pen
+
+    if "opponent_goals" in out.columns and "venue" in out.columns:
+        og = pd.to_numeric(out["opponent_goals"], errors="coerce").fillna(0)
+        opp_pen = pen_away.where(out["venue"] == "home", pen_home)
+        out["opponent_goals"] = og - opp_pen
+
+    return out
 
 
 def _split_over_under_counts(df: pd.DataFrame, line: float) -> dict[str, int]:
@@ -2930,6 +2998,13 @@ def create_app() -> Flask:
             side_label="away",
         )
 
+        # NPG toggle: subtract penalty goals from goal counts
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
         home_metrics = _split_over_under_counts(home_df, line)
         away_metrics = _split_over_under_counts(away_df, line)
 
@@ -3189,7 +3264,7 @@ def create_app() -> Flask:
                     bet_type="btts",
                     perspective=home_perspective,
                     filters=filters,
-                    required_features=["goals_scored", "opponent_goals"],
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
                 )
@@ -3205,7 +3280,7 @@ def create_app() -> Flask:
                     bet_type="btts",
                     perspective=away_perspective,
                     filters=filters,
-                    required_features=["goals_scored", "opponent_goals"],
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
                 )
@@ -3247,6 +3322,12 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
 
         home_metrics = _split_btts_counts(home_df)
         away_metrics = _split_btts_counts(away_df)
@@ -3346,7 +3427,7 @@ def create_app() -> Flask:
                     bet_type="home_ou",
                     perspective=home_perspective,
                     filters=filters,
-                    required_features=["goals_scored", "opponent_goals"],
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
                 )
@@ -3374,6 +3455,11 @@ def create_app() -> Flask:
             notes=notes,
             side_label="home",
         )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            notes.append("npg_toggle=on")
 
         home_metrics = _split_over_under_counts_for_column(home_df, line, "goals_scored")
         away_metrics = {"over": 0, "under": 0}
@@ -3477,7 +3563,7 @@ def create_app() -> Flask:
                     bet_type="away_ou",
                     perspective=away_perspective,
                     filters=filters,
-                    required_features=["goals_scored", "opponent_goals"],
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
                     home_team_id=home_team_id,
                     away_team_id=away_team_id,
                 )
@@ -3505,6 +3591,11 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
 
         home_metrics = {"over": 0, "under": 0}
         away_metrics = _split_over_under_counts_for_column(away_df, line, "goals_scored")

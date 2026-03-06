@@ -10,7 +10,12 @@
       "Bash(py -3 -c \"import os; key=os.environ.get\\(''OPENAI_API_KEY'',''''\\); print\\(''len:'', len\\(key\\)\\); print\\(''start:'', repr\\(key[:12]\\)\\); print\\(''end:'', repr\\(key[-6:]\\)\\); print\\(''has whitespace:'', key != key.strip\\(\\)\\); print\\(''has newline:'', chr\\(10\\) in key or chr\\(13\\) in key\\)\")",
       "Bash(py -3 \"c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/check_key.py\")",
       "Bash(py -3 -m pip install python-dotenv)",
-      "Bash(py -3 -c \"import pandas as pd; df = pd.read_csv\\(''c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/spain_la_liga/season_df.csv''\\); print\\(''Columns:'', list\\(df.columns\\)\\); print\\(''Shape:'', df.shape\\); print\\(\\); print\\(''Sample teams:'', df[''home_team''].unique\\(\\)[:10] if ''home_team'' in df.columns else ''no home_team col''\\)\")"
+      "Bash(py -3 -c \"import pandas as pd; df = pd.read_csv\\(''c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/spain_la_liga/season_df.csv''\\); print\\(''Columns:'', list\\(df.columns\\)\\); print\\(''Shape:'', df.shape\\); print\\(\\); print\\(''Sample teams:'', df[''home_team''].unique\\(\\)[:10] if ''home_team'' in df.columns else ''no home_team col''\\)\")",
+      "Bash(py -3 update_data.py)",
+      "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json''\\)\\); m=data[list\\(data.keys\\(\\)\\)[0]]; print\\(json.dumps\\({k:v for k,v in m.items\\(\\) if ''penal'' in k.lower\\(\\) or ''pen'' in k.lower\\(\\)}, indent=2\\)\\)\")",
+      "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json'', encoding=''utf-8''\\)\\); m=data[list\\(data.keys\\(\\)\\)[0]]; print\\(json.dumps\\({k:v for k,v in m.items\\(\\) if ''penal'' in k.lower\\(\\) or ''pen'' in k.lower\\(\\)}, indent=2\\)\\)\")",
+      "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json'', encoding=''utf-8''\\)\\); m=data[0]; print\\(json.dumps\\(list\\(m.keys\\(\\)\\), indent=2\\)\\)\")",
+      "Bash(python3:*)"
     ]
   }
 }

@@ -473,9 +473,9 @@ def _to_bool(value):
 def _serialize_shot_payload(shot_df: pd.DataFrame):
     """
     Build nested home/away shot payload JSON strings:
-    {"xg": [...], "count": N}
+    {"xg": [...], "count": N, "penalty_goals": M, "penalty_attempts": P}
     """
-    empty_payload = json.dumps({"xg": [], "count": 0}, ensure_ascii=False)
+    empty_payload = json.dumps({"xg": [], "count": 0, "penalty_goals": 0, "penalty_attempts": 0}, ensure_ascii=False)
     if shot_df is None or shot_df.empty:
         return empty_payload, empty_payload
     if "isHome" not in shot_df.columns or "xg" not in shot_df.columns:
@@ -486,11 +486,29 @@ def _serialize_shot_payload(shot_df: pd.DataFrame):
     frame["xg"] = pd.to_numeric(frame["xg"], errors="coerce")
     frame = frame.dropna(subset=["xg"])
 
-    home_xg = [float(v) for v in frame[frame["isHomeBool"]]["xg"].tolist()]
-    away_xg = [float(v) for v in frame[~frame["isHomeBool"]]["xg"].tolist()]
+    has_situation = "situation" in frame.columns
+    has_shot_type = "shotType" in frame.columns
 
-    home_payload = json.dumps({"xg": home_xg, "count": len(home_xg)}, ensure_ascii=False)
-    away_payload = json.dumps({"xg": away_xg, "count": len(away_xg)}, ensure_ascii=False)
+    for is_home, label in [(True, "home"), (False, "away")]:
+        side = frame[frame["isHomeBool"] == is_home]
+        if has_situation:
+            pen_shots = side[side["situation"] == "penalty"]
+            pen_attempts = len(pen_shots)
+            pen_goals = int((pen_shots["shotType"] == "goal").sum()) if has_shot_type else 0
+        else:
+            pen_attempts = 0
+            pen_goals = 0
+        if label == "home":
+            home_xg = [float(v) for v in side["xg"].tolist()]
+            home_pen_goals = pen_goals
+            home_pen_attempts = pen_attempts
+        else:
+            away_xg = [float(v) for v in side["xg"].tolist()]
+            away_pen_goals = pen_goals
+            away_pen_attempts = pen_attempts
+
+    home_payload = json.dumps({"xg": home_xg, "count": len(home_xg), "penalty_goals": home_pen_goals, "penalty_attempts": home_pen_attempts}, ensure_ascii=False)
+    away_payload = json.dumps({"xg": away_xg, "count": len(away_xg), "penalty_goals": away_pen_goals, "penalty_attempts": away_pen_attempts}, ensure_ascii=False)
     return home_payload, away_payload
 
 
@@ -602,6 +620,32 @@ def _apply_derived_features(df):
 
     if {"home_normaltime", "away_normaltime"}.issubset(out.columns):
         out["total_goals"] = out["home_normaltime"] + out["away_normaltime"]
+
+    # Extract penalty goals from shot payloads for NPG calculations
+    for side in ("home", "away"):
+        col = f"{side}_shots"
+        pg_col = f"penalty_goals_{side}"
+        if col in out.columns:
+            pen_goals = []
+            for raw in out[col].tolist():
+                payload = None
+                if isinstance(raw, dict):
+                    payload = raw
+                elif isinstance(raw, str):
+                    text = raw.strip()
+                    if text:
+                        try:
+                            payload = json.loads(text)
+                        except Exception:
+                            payload = None
+                pen_goals.append(int(payload.get("penalty_goals", 0)) if isinstance(payload, dict) else 0)
+            out[pg_col] = pen_goals
+        else:
+            out[pg_col] = 0
+
+    out["penalty_goals_home"] = pd.to_numeric(out["penalty_goals_home"], errors="coerce").fillna(0).astype(int)
+    out["penalty_goals_away"] = pd.to_numeric(out["penalty_goals_away"], errors="coerce").fillna(0).astype(int)
+    out["total_penalty_goals"] = out["penalty_goals_home"] + out["penalty_goals_away"]
 
     if {"final_third_phase_home", "final_third_phase_away"}.issubset(out.columns):
         home_phase = pd.to_numeric(out["final_third_phase_home"], errors="coerce")

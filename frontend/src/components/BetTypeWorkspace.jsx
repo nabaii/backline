@@ -51,6 +51,7 @@ function createDefaultFilters() {
     opponent_rank_momentum_range: [1, 20],
     opponent_rank_possession_range: [1, 20],
     similar_teams_mode: 'off',
+    npg_toggle: false,
     shot_xg_threshold: 0.3,
     shot_xg_min_shots: 0,
     games_mode: 'max',
