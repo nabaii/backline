@@ -6,7 +6,7 @@ Flow
 1. Accept a natural-language user query (and optional team context).
 2. Retrieve the most relevant match documents from ChromaDB.
 3. Build a prompt with those documents as context.
-4. Call Claude via the Anthropic SDK and stream the response back.
+4. Call OpenAI GPT and stream the response back.
 
 The pipeline is intentionally stateless — call ``run()`` per request.
 """
@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Generator
 
-import anthropic
+from openai import OpenAI
 
 from backend.rag.vector_store import MatchVectorStore
 
@@ -25,9 +25,9 @@ from backend.rag.vector_store import MatchVectorStore
 # Config
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+_DEFAULT_MODEL = "gpt-4o"
 _DEFAULT_N_RESULTS = 12        # matches to pull from Chroma
-_MAX_CONTEXT_CHARS = 20_000    # safety cap before sending to Claude
+_MAX_CONTEXT_CHARS = 20_000    # safety cap before sending to the LLM
 
 _SYSTEM_PROMPT = """\
 You are a football analytics assistant for the Backline platform.
@@ -73,7 +73,7 @@ class RAGPipeline:
     vector_store:
         An already-initialised MatchVectorStore.
     api_key:
-        Anthropic API key. Falls back to the ``ANTHROPIC_API_KEY``
+        OpenAI API key. Falls back to the ``OPENAI_API_KEY``
         environment variable if not supplied.
     """
 
@@ -83,82 +83,17 @@ class RAGPipeline:
         api_key: str | None = None,
     ) -> None:
         self._store = vector_store
-        self._client = anthropic.Anthropic(
-            api_key=api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self._client = OpenAI(
+            api_key=api_key or os.environ.get("OPENAI_API_KEY", "")
         )
 
     # ------------------------------------------------------------------
-    # Core method
+    # Helpers
     # ------------------------------------------------------------------
 
-    def run(self, request: RAGRequest) -> RAGResponse:
-        """Retrieve relevant matches and ask Claude to analyse them."""
-
-        # 1. Retrieve
-        team_ids = [
-            t for t in [request.home_team_id, request.away_team_id] if t
-        ]
-        if team_ids:
-            hits = self._store.query_for_teams(
-                request.query,
-                team_ids=team_ids,
-                n_results=request.n_results,
-            )
-        else:
-            hits = self._store.query(request.query, n_results=request.n_results)
-
-        # 2. Build context string
-        context_parts: list[str] = []
-        char_budget = _MAX_CONTEXT_CHARS
-        for hit in hits:
-            snippet = hit["text"]
-            if len(snippet) > char_budget:
-                break
-            context_parts.append(snippet)
-            char_budget -= len(snippet)
-
-        context_block = "\n\n---\n\n".join(context_parts) if context_parts else "No matching matches found."
-
-        # 3. Build user message
-        fixture_line = ""
-        if request.home_team_id and request.away_team_id:
-            fixture_line = (
-                f"Upcoming fixture: {request.home_team_id} (home) "
-                f"vs {request.away_team_id} (away).\n\n"
-            )
-
-        user_message = (
-            f"{fixture_line}"
-            f"{request.extra_context}\n\n" if request.extra_context else f"{fixture_line}"
-        ) + (
-            f"Historical match context:\n\n{context_block}\n\n"
-            f"User question: {request.query}"
-        )
-
-        # 4. Call Claude
-        message = self._client.messages.create(
-            model=request.model,
-            max_tokens=1024,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-
-        answer = message.content[0].text if message.content else ""
-
-        return RAGResponse(
-            answer=answer,
-            retrieved_matches=hits,
-            match_count=len(hits),
-        )
-
-    def stream(self, request: RAGRequest) -> Generator[str, None, None]:
-        """
-        Same as ``run()`` but yields text chunks as they arrive from Claude.
-        Useful for server-sent events on the Flask side.
-        """
-        team_ids = [
-            t for t in [request.home_team_id, request.away_team_id] if t
-        ]
+    def _retrieve_and_build_prompt(self, request: RAGRequest) -> tuple[list[dict], str]:
+        """Retrieve hits and return (hits, user_message)."""
+        team_ids = [t for t in [request.home_team_id, request.away_team_id] if t]
         if team_ids:
             hits = self._store.query_for_teams(
                 request.query,
@@ -193,11 +128,51 @@ class RAGPipeline:
             f"User question: {request.query}"
         )
 
-        with self._client.messages.stream(
+        return hits, user_message
+
+    # ------------------------------------------------------------------
+    # Core methods
+    # ------------------------------------------------------------------
+
+    def run(self, request: RAGRequest) -> RAGResponse:
+        """Retrieve relevant matches and ask GPT to analyse them."""
+        hits, user_message = self._retrieve_and_build_prompt(request)
+
+        response = self._client.chat.completions.create(
             model=request.model,
             max_tokens=1024,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        ) as stream:
-            for text in stream.text_stream:
-                yield text
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+
+        answer = response.choices[0].message.content or ""
+
+        return RAGResponse(
+            answer=answer,
+            retrieved_matches=hits,
+            match_count=len(hits),
+        )
+
+    def stream(self, request: RAGRequest) -> Generator[str, None, None]:
+        """
+        Same as ``run()`` but yields text chunks as they arrive from GPT.
+        Useful for server-sent events on the Flask side.
+        """
+        hits, user_message = self._retrieve_and_build_prompt(request)
+
+        response = self._client.chat.completions.create(
+            model=request.model,
+            max_tokens=1024,
+            stream=True,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+
+        for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta

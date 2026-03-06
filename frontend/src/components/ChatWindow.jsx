@@ -10,8 +10,6 @@ export default function ChatWindow({ selectedFixture }) {
   const abortRef = useRef(false)
 
   const hasMessages = messages.length > 0
-  const homeTeamId = selectedFixture?.home_team_id || null
-  const awayTeamId = selectedFixture?.away_team_id || null
   const fixtureLabel = selectedFixture
     ? `${selectedFixture.home_team_name} vs ${selectedFixture.away_team_name}`
     : null
@@ -32,8 +30,6 @@ export default function ChatWindow({ selectedFixture }) {
       await ragStream(
         {
           query: text,
-          home_team_id: homeTeamId,
-          away_team_id: awayTeamId,
           extra_context: fixtureLabel ? `Fixture context: ${fixtureLabel}` : '',
         },
         (chunk) => {

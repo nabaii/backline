@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import csv
 import difflib
 import gzip
@@ -56,6 +59,19 @@ PRIMARY_SEASON_DATA_PATH = DATA_DIR / "season_df.csv"
 LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
+
+
+def _load_all_season_dfs() -> "pd.DataFrame":
+    """Load and concatenate season_df.csv from all league folders under LEAGUES_DIR."""
+    frames = []
+    for league_dir in sorted(LEAGUES_DIR.iterdir()):
+        csv_path = league_dir / "season_df.csv"
+        if csv_path.exists():
+            frames.append(pd.read_csv(csv_path))
+    if not frames:
+        # Fallback to the top-level file
+        frames.append(pd.read_csv(PRIMARY_SEASON_DATA_PATH))
+    return pd.concat(frames, ignore_index=True)
 
 # â"€â"€ Multi-league registry â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 LEAGUE_REGISTRY: list[dict[str, str]] = [
@@ -3713,7 +3729,7 @@ def create_app() -> Flask:
         from backend.rag.vector_store import MatchVectorStore
 
         try:
-            df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+            df = _load_all_season_dfs()
             rows = df.to_dict("records")
             docs = build_documents(rows)
 
@@ -3755,7 +3771,7 @@ def create_app() -> Flask:
             if store.count == 0:
                 # Auto-ingest on first query if store is empty
                 try:
-                    df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+                    df = _load_all_season_dfs()
                     docs = build_documents(df.to_dict("records"))
                     store.ingest(docs)
                 except Exception as exc:
@@ -3809,7 +3825,7 @@ def create_app() -> Flask:
             store = MatchVectorStore()
             if store.count == 0:
                 try:
-                    df = pd.read_csv(PRIMARY_SEASON_DATA_PATH)
+                    df = _load_all_season_dfs()
                     docs = build_documents(df.to_dict("records"))
                     store.ingest(docs)
                 except Exception as exc:
@@ -3831,10 +3847,7 @@ def create_app() -> Flask:
                 for chunk in pipeline.stream(rag_request):
                     yield chunk
             except Exception as exc:
-                yield f"
-
-[Error: {exc}]"
-
+                yield f"\n\n[Error: {exc}]"
         return Response(
             stream_with_context(generate()),
             mimetype="text/plain",

@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(pip install chromadb anthropic)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "Bash(pip install \"openai>=1.30.0\")",
+      "Bash(python -c \"import numpy; print\\(''numpy'', numpy.__version__\\); import openai; print\\(''openai'', openai.__version__\\)\")",
+      "Bash(powershell -Command \"Write-Host ''Key length:'' $env:OPENAI_API_KEY.Length; if \\($env:OPENAI_API_KEY.Length -gt 10\\) { Write-Host ''First 10:'' $env:OPENAI_API_KEY.Substring\\(0,10\\); Write-Host ''Last 6:'' $env:OPENAI_API_KEY.Substring\\($env:OPENAI_API_KEY.Length-6\\) } else { Write-Host ''Key appears empty or very short'' }\")",
+      "Bash(powershell -Command \"$key = [System.Environment]::GetEnvironmentVariable\\(''OPENAI_API_KEY'', ''User''\\); if \\($key\\) { Write-Host ''User env - Length:'' $key.Length; Write-Host ''First 10:'' $key.Substring\\(0,[Math]::Min\\(10,$key.Length\\)\\); Write-Host ''Last 6:'' $key.Substring\\([Math]::Max\\(0,$key.Length-6\\)\\) } else { Write-Host ''Not set in User environment'' }; $key2 = [System.Environment]::GetEnvironmentVariable\\(''OPENAI_API_KEY'', ''Machine''\\); if \\($key2\\) { Write-Host ''Machine env - Length:'' $key2.Length } else { Write-Host ''Not set in Machine environment'' }\")",
+      "Bash(py -3 -c \"import os; key=os.environ.get\\(''OPENAI_API_KEY'',''''\\); print\\(''len:'', len\\(key\\)\\); print\\(''start:'', repr\\(key[:12]\\)\\); print\\(''end:'', repr\\(key[-6:]\\)\\); print\\(''has whitespace:'', key != key.strip\\(\\)\\); print\\(''has newline:'', chr\\(10\\) in key or chr\\(13\\) in key\\)\")",
+      "Bash(py -3 \"c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/check_key.py\")",
+      "Bash(py -3 -m pip install python-dotenv)",
+      "Bash(py -3 -c \"import pandas as pd; df = pd.read_csv\\(''c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/spain_la_liga/season_df.csv''\\); print\\(''Columns:'', list\\(df.columns\\)\\); print\\(''Shape:'', df.shape\\); print\\(\\); print\\(''Sample teams:'', df[''home_team''].unique\\(\\)[:10] if ''home_team'' in df.columns else ''no home_team col''\\)\")"
     ]
   }
 }
