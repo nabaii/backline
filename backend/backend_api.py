@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -59,6 +60,7 @@ PRIMARY_SEASON_DATA_PATH = DATA_DIR / "season_df.csv"
 LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
+FIXTURE_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 
 
 def _load_all_season_dfs() -> "pd.DataFrame":
@@ -209,6 +211,91 @@ _snapshot_cache: dict[str, Any] = {
 _sofascore_fixture_cache: dict[str, dict[str, Any]] = {}
 _sofascore_season_cache: dict[str, dict[str, Any]] = {}
 _understat_fixture_cache: dict[str, dict[str, Any]] = {}
+
+# ── Fixture request deduplication ──────────────────────────────────────
+_fixture_inflight_locks: dict[str, Lock] = {}
+_fixture_inflight_meta_lock = Lock()
+
+
+def _get_fixture_lock(league_id: str) -> Lock:
+    """Return a per-league lock so concurrent requests for the same league
+    wait for the first request to finish instead of duplicating work."""
+    with _fixture_inflight_meta_lock:
+        if league_id not in _fixture_inflight_locks:
+            _fixture_inflight_locks[league_id] = Lock()
+        return _fixture_inflight_locks[league_id]
+
+
+# ── File-based fixture cache (persists across server restarts) ─────────
+FIXTURE_FILE_CACHE_TTL_SECONDS = 600  # 10 minutes
+
+
+def _fixture_file_cache_path(league_id: str) -> Path:
+    return FIXTURE_CACHE_DIR / f"fixtures_{league_id}.json"
+
+
+def _load_fixture_file_cache(league_id: str) -> list[dict[str, Any]] | None:
+    """Return cached fixture dicts if the file exists and is fresh, else None."""
+    path = _fixture_file_cache_path(league_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = datetime.fromisoformat(data.get("saved_at", ""))
+        if (datetime.now(timezone.utc) - saved_at).total_seconds() > FIXTURE_FILE_CACHE_TTL_SECONDS:
+            return None
+        return data.get("fixtures", [])
+    except Exception:
+        return None
+
+
+def _save_fixture_file_cache(league_id: str, rows: list["FixtureRow"]) -> None:
+    """Persist fixture rows to disk for cross-restart caching."""
+    try:
+        FIXTURE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "fixtures": [
+                {
+                    "match_id": r.match_id,
+                    "league_id": r.league_id,
+                    "gameweek": r.gameweek,
+                    "kickoff": r.kickoff,
+                    "home_team_id": r.home_team_id,
+                    "away_team_id": r.away_team_id,
+                    "home_team_name": r.home_team_name,
+                    "away_team_name": r.away_team_name,
+                    "home_team_score": r.home_team_score,
+                    "away_team_score": r.away_team_score,
+                    "finished": r.finished,
+                }
+                for r in rows
+            ],
+        }
+        path = _fixture_file_cache_path(league_id)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass  # best-effort; never crash on cache write failure
+
+
+def _fixture_dicts_to_rows(dicts: list[dict[str, Any]]) -> list["FixtureRow"]:
+    """Convert file-cache dicts back to FixtureRow objects."""
+    rows = []
+    for d in dicts:
+        rows.append(FixtureRow(
+            match_id=d["match_id"],
+            league_id=d.get("league_id", ""),
+            gameweek=d.get("gameweek", 0),
+            kickoff=d.get("kickoff", ""),
+            home_team_id=d.get("home_team_id", 0),
+            away_team_id=d.get("away_team_id", 0),
+            home_team_name=d.get("home_team_name", ""),
+            away_team_name=d.get("away_team_name", ""),
+            home_team_score=d.get("home_team_score"),
+            away_team_score=d.get("away_team_score"),
+            finished=d.get("finished", False),
+        ))
+    return rows
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -423,7 +510,21 @@ def _get_live_sofascore_league_fixtures(
     if not league_name:
         return []
 
-    try:
+    # Fast path: in-memory cache hit (no lock needed).
+    now = datetime.now(timezone.utc)
+    cached = _sofascore_fixture_cache.get(league_id)
+    cached_expires_at = (
+        cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+        if isinstance(cached, dict)
+        else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+    if isinstance(cached, dict) and now < cached_expires_at:
+        return list(cached.get("fixtures", []))
+
+    # Dedup: if another thread is already fetching this league, wait for it.
+    lock = _get_fixture_lock(league_id)
+    with lock:
+        # Re-check in-memory cache (another thread may have populated it).
         now = datetime.now(timezone.utc)
         cached = _sofascore_fixture_cache.get(league_id)
         cached_expires_at = (
@@ -434,70 +535,74 @@ def _get_live_sofascore_league_fixtures(
         if isinstance(cached, dict) and now < cached_expires_at:
             return list(cached.get("fixtures", []))
 
-        season_label = _current_season_label(reference_time or now)
-        season_context = _resolve_sofascore_season_context(
-            league_name=league_name,
-            season_label=season_label,
-        )
-        if season_context is None:
-            return []
-        tournament_id, season_id = season_context
-
         try:
-            next_events = _fetch_sofascore_events(
-                tournament_id=tournament_id,
-                season_id=season_id,
-                direction="next",
-                max_pages=1,
+            season_label = _current_season_label(reference_time or now)
+            season_context = _resolve_sofascore_season_context(
+                league_name=league_name,
+                season_label=season_label,
             )
-            last_events = _fetch_sofascore_events(
-                tournament_id=tournament_id,
-                season_id=season_id,
-                direction="last",
-                max_pages=1,
+            if season_context is None:
+                # Fall back to file cache on failure.
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+            tournament_id, season_id = season_context
+
+            try:
+                next_events = _fetch_sofascore_events(
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                    direction="next",
+                    max_pages=1,
+                )
+                last_events = _fetch_sofascore_events(
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                    direction="last",
+                    max_pages=1,
+                )
+            except Exception:
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+            by_match_id: dict[int, dict[str, Any]] = {}
+            for event in last_events:
+                if not _is_sofascore_event_inprogress(event):
+                    continue
+                match_id = _safe_int(event.get("id"), 0)
+                if match_id > 0:
+                    by_match_id[match_id] = event
+            for event in next_events:
+                match_id = _safe_int(event.get("id"), 0)
+                if match_id > 0:
+                    by_match_id[match_id] = event
+
+            rows = [
+                row
+                for row in (
+                    _sofascore_event_to_fixture_row(event, league_id=league_id)
+                    for event in by_match_id.values()
+                )
+                if row is not None
+            ]
+
+            rows.sort(
+                key=lambda row: (
+                    _parse_utc_datetime(row.kickoff) is None,
+                    _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
+                    row.gameweek,
+                    row.home_team_name,
+                )
             )
+
+            _sofascore_fixture_cache[league_id] = {
+                "fixtures": rows,
+                "expires_at": now + timedelta(seconds=SOFASCORE_FIXTURE_CACHE_TTL_SECONDS),
+            }
+            _save_fixture_file_cache(league_id, rows)
+            return rows
         except Exception:
-            return []
-
-        # Keep upcoming fixtures plus currently in-progress events from the latest completed page.
-        by_match_id: dict[int, dict[str, Any]] = {}
-        for event in last_events:
-            if not _is_sofascore_event_inprogress(event):
-                continue
-            match_id = _safe_int(event.get("id"), 0)
-            if match_id > 0:
-                by_match_id[match_id] = event
-        for event in next_events:
-            match_id = _safe_int(event.get("id"), 0)
-            if match_id > 0:
-                by_match_id[match_id] = event
-
-        rows = [
-            row
-            for row in (
-                _sofascore_event_to_fixture_row(event, league_id=league_id)
-                for event in by_match_id.values()
-            )
-            if row is not None
-        ]
-
-        rows.sort(
-            key=lambda row: (
-                _parse_utc_datetime(row.kickoff) is None,
-                _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
-                row.gameweek,
-                row.home_team_name,
-            )
-        )
-
-        _sofascore_fixture_cache[league_id] = {
-            "fixtures": rows,
-            "expires_at": now + timedelta(seconds=SOFASCORE_FIXTURE_CACHE_TTL_SECONDS),
-        }
-        return rows
-    except Exception:
-        # Never let third-party fixture lookups crash league fixture responses.
-        return []
+            file_cached = _load_fixture_file_cache(league_id)
+            return _fixture_dicts_to_rows(file_cached) if file_cached else []
 
 
 def _get_local_matches_json_league_fixtures(
@@ -667,6 +772,7 @@ def _get_understat_league_fixtures(
     if not league_name:
         return []
 
+    # Fast path: in-memory cache hit.
     now = datetime.now(timezone.utc)
     cached = _understat_fixture_cache.get(league_id)
     cached_expires_at = (
@@ -679,47 +785,66 @@ def _get_understat_league_fixtures(
         if isinstance(cached_rows, list):
             return _upcoming_or_live_fixtures(cached_rows, reference_time or now)
 
-    try:
-        season_year = _understat_season_year(reference_time or now)
-        season_candidates = [season_year]
+    # Dedup: serialize concurrent requests for the same league.
+    lock = _get_fixture_lock(f"understat_{league_id}")
+    with lock:
+        # Re-check after acquiring lock.
+        now = datetime.now(timezone.utc)
+        cached = _understat_fixture_cache.get(league_id)
+        cached_expires_at = (
+            cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+            if isinstance(cached, dict)
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
+        if isinstance(cached, dict) and now < cached_expires_at:
+            cached_rows = cached.get("fixtures", [])
+            if isinstance(cached_rows, list):
+                return _upcoming_or_live_fixtures(cached_rows, reference_time or now)
+
         try:
-            season_candidates.append(str(int(season_year) - 1))
+            season_year = _understat_season_year(reference_time or now)
+            season_candidates = [season_year]
+            try:
+                season_candidates.append(str(int(season_year) - 1))
+            except Exception:
+                pass
+
+            rows: list[FixtureRow] = []
+            for season in season_candidates:
+                league_segment = quote(league_name, safe="")
+                referer_segment = quote(league_name.replace(" ", "_"), safe="_")
+                url = f"https://understat.com/getLeagueData/{league_segment}/{season}/"
+                referer = f"https://understat.com/league/{referer_segment}/{season}"
+                payload = _understat_json(url, referer=referer)
+                dates = payload.get("dates") if isinstance(payload, dict) else None
+                if not isinstance(dates, list):
+                    continue
+
+                rows = [
+                    row
+                    for row in (
+                        _understat_event_to_fixture_row(event, league_id=league_id)
+                        for event in dates
+                    )
+                    if row is not None
+                ]
+                if rows:
+                    break
+
+            if not rows:
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+            rows = _sort_fixtures_by_kickoff(rows)
+            _understat_fixture_cache[league_id] = {
+                "fixtures": rows,
+                "expires_at": now + timedelta(seconds=UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS),
+            }
+            _save_fixture_file_cache(league_id, rows)
+            return _upcoming_or_live_fixtures(rows, reference_time or now)
         except Exception:
-            pass
-
-        rows: list[FixtureRow] = []
-        for season in season_candidates:
-            league_segment = quote(league_name, safe="")
-            referer_segment = quote(league_name.replace(" ", "_"), safe="_")
-            url = f"https://understat.com/getLeagueData/{league_segment}/{season}/"
-            referer = f"https://understat.com/league/{referer_segment}/{season}"
-            payload = _understat_json(url, referer=referer)
-            dates = payload.get("dates") if isinstance(payload, dict) else None
-            if not isinstance(dates, list):
-                continue
-
-            rows = [
-                row
-                for row in (
-                    _understat_event_to_fixture_row(event, league_id=league_id)
-                    for event in dates
-                )
-                if row is not None
-            ]
-            if rows:
-                break
-
-        if not rows:
-            return []
-
-        rows = _sort_fixtures_by_kickoff(rows)
-        _understat_fixture_cache[league_id] = {
-            "fixtures": rows,
-            "expires_at": now + timedelta(seconds=UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS),
-        }
-        return _upcoming_or_live_fixtures(rows, reference_time or now)
-    except Exception:
-        return []
+            file_cached = _load_fixture_file_cache(league_id)
+            return _fixture_dicts_to_rows(file_cached) if file_cached else []
 
 
 def _normalize_range(value: Any, default_low: float = 0.0, default_high: float = 10.0) -> tuple[float, float]:
@@ -796,10 +921,10 @@ def _load_raw_df() -> pd.DataFrame:
 def _build_store() -> AnalyticsStore:
     raw_df = _load_raw_df()
     builder = MatchAnalyticsBuilder()
-    analytics = []
-    for match_id in raw_df["match_id"].unique():
-        match_df = raw_df[raw_df["match_id"] == match_id].copy()
-        analytics.append(builder.build(match_df))
+    analytics = [
+        builder.build(match_df.copy())
+        for _, match_df in raw_df.groupby("match_id", sort=False)
+    ]
 
     store = AnalyticsStore()
     store.ingest(analytics)
@@ -1884,6 +2009,34 @@ def _split_double_chance_counts(df: pd.DataFrame) -> dict[str, int]:
     return {"hits": 0, "misses": 0}
 
 
+def _split_win_both_halves_counts(df: pd.DataFrame) -> dict[str, int]:
+    needed = {"team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"}
+    if needed.issubset(df.columns):
+        th1 = pd.to_numeric(df["team_h1_goals"], errors="coerce").fillna(0)
+        oh1 = pd.to_numeric(df["opponent_h1_goals"], errors="coerce").fillna(0)
+        th2 = pd.to_numeric(df["team_h2_goals"], errors="coerce").fillna(0)
+        oh2 = pd.to_numeric(df["opponent_h2_goals"], errors="coerce").fillna(0)
+        won_both = ((th1 > oh1) & (th2 > oh2))
+        hits = int(won_both.sum())
+        misses = int((~won_both).sum())
+        return {"hits": hits, "misses": misses}
+    return {"hits": 0, "misses": 0}
+
+
+def _split_win_either_half_counts(df: pd.DataFrame) -> dict[str, int]:
+    needed = {"team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"}
+    if needed.issubset(df.columns):
+        th1 = pd.to_numeric(df["team_h1_goals"], errors="coerce").fillna(0)
+        oh1 = pd.to_numeric(df["opponent_h1_goals"], errors="coerce").fillna(0)
+        th2 = pd.to_numeric(df["team_h2_goals"], errors="coerce").fillna(0)
+        oh2 = pd.to_numeric(df["opponent_h2_goals"], errors="coerce").fillna(0)
+        won_either = ((th1 > oh1) | (th2 > oh2))
+        hits = int(won_either.sum())
+        misses = int((~won_either).sum())
+        return {"hits": hits, "misses": misses}
+    return {"hits": 0, "misses": 0}
+
+
 def _split_btts_counts(df: pd.DataFrame) -> dict[str, int]:
     if {"goals_scored", "opponent_goals"}.issubset(df.columns):
         goals_scored = pd.to_numeric(df["goals_scored"], errors="coerce").fillna(0)
@@ -2512,6 +2665,148 @@ def _build_recent_matches_btts(
                 "goals_scored": goals_scored,
                 "opponent_goals": opponent_goals,
                 "btts_result": "Y" if is_btts else "N",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_weh(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    recent_df = df.copy()
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for _, row in recent_df.iterrows():
+        th1 = float(row.get("team_h1_goals", 0))
+        oh1 = float(row.get("opponent_h1_goals", 0))
+        th2 = float(row.get("team_h2_goals", 0))
+        oh2 = float(row.get("opponent_h2_goals", 0))
+        won_either = (th1 > oh1) or (th2 > oh2)
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+
+        if venue == "home":
+            team_name = home_name
+            opponent_name = away_name
+            chart_label = f"vs {opponent_name}"
+            fixture_display = f"{team_name} vs {opponent_name}"
+        else:
+            team_name = away_name
+            opponent_name = home_name
+            chart_label = f"@ {opponent_name}"
+            fixture_display = f"{opponent_name} vs {team_name}"
+
+        match_datetime = match_datetime_lookup.get(match_id)
+        match_date = ""
+        if match_datetime is not None:
+            try:
+                ts = pd.Timestamp(match_datetime)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                else:
+                    ts = ts.tz_convert("UTC")
+                match_date = ts.isoformat().replace("+00:00", "Z")
+            except Exception:
+                match_date = ""
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": match_date,
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "team_h2_goals": th2,
+                "opponent_h2_goals": oh2,
+                "weh_result": "Y" if won_either else "N",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_wbh(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    recent_df = df.copy()
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for _, row in recent_df.iterrows():
+        th1 = float(row.get("team_h1_goals", 0))
+        oh1 = float(row.get("opponent_h1_goals", 0))
+        th2 = float(row.get("team_h2_goals", 0))
+        oh2 = float(row.get("opponent_h2_goals", 0))
+        won_both = (th1 > oh1) and (th2 > oh2)
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+
+        if venue == "home":
+            team_name = home_name
+            opponent_name = away_name
+            chart_label = f"vs {opponent_name}"
+            fixture_display = f"{team_name} vs {opponent_name}"
+        else:
+            team_name = away_name
+            opponent_name = home_name
+            chart_label = f"@ {opponent_name}"
+            fixture_display = f"{opponent_name} vs {team_name}"
+
+        match_datetime = match_datetime_lookup.get(match_id)
+        match_date = ""
+        if match_datetime is not None:
+            try:
+                ts = pd.Timestamp(match_datetime)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize("UTC")
+                else:
+                    ts = ts.tz_convert("UTC")
+                match_date = ts.isoformat().replace("+00:00", "Z")
+            except Exception:
+                match_date = ""
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": match_date,
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "team_h2_goals": th2,
+                "opponent_h2_goals": oh2,
+                "wbh_result": "Y" if won_both else "N",
                 **_build_overlay_metrics_from_row(
                     row,
                     venue=venue,
@@ -3370,6 +3665,326 @@ def create_app() -> Flask:
             "recent_matches": {
                 "home": _build_recent_matches_btts(home_df, league_id=league_id_for_ranking),
                 "away": _build_recent_matches_btts(away_df, league_id=league_id_for_ranking),
+            },
+            "notes": notes,
+        }
+        return jsonify(response)
+
+    @app.route("/api/workspace/win_either_half", methods=["POST", "OPTIONS"])
+    def get_workspace_win_either_half():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="win_either_half",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="win_either_half",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_win_either_half_counts(home_df)
+        away_metrics = _split_win_either_half_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Won Half Yes",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "Won Half No",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+
+        response = {
+            "workspace": {
+                "bet_type": "win_either_half",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_weh(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_weh(away_df, league_id=league_id_for_ranking),
+            },
+            "notes": notes,
+        }
+        return jsonify(response)
+
+    @app.route("/api/workspace/win_both_halves", methods=["POST", "OPTIONS"])
+    def get_workspace_win_both_halves():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="win_both_halves",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="win_both_halves",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_win_both_halves_counts(home_df)
+        away_metrics = _split_win_both_halves_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Won Both Yes",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "Won Both No",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+
+        response = {
+            "workspace": {
+                "bet_type": "win_both_halves",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_wbh(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_wbh(away_df, league_id=league_id_for_ranking),
             },
             "notes": notes,
         }

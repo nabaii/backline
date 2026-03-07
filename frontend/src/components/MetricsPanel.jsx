@@ -6,6 +6,8 @@ const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
 const BET_TYPE_BTTS = 'btts'
 const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
+const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
 
 function isOverUnderFamilyBetType(betType) {
   const normalized = String(betType).toLowerCase()
@@ -26,7 +28,7 @@ function renderSampleSize(sampleSize, sampleSizes) {
   return String(sampleSize ?? 0)
 }
 
-function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts, isCorners }) {
+function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts, isWeh, isWbh, isCorners }) {
   if (isCorners) {
     const over = Number(metrics?.over ?? 0)
     const under = Number(metrics?.under ?? 0)
@@ -49,18 +51,14 @@ function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts,
 
   const total = isOverUnder
     ? Number((metrics?.over ?? 0) + (metrics?.under ?? 0))
-    : isDoubleChance
+    : (isDoubleChance || isBtts || isWeh || isWbh)
       ? Number((metrics?.hits ?? 0) + (metrics?.misses ?? 0))
-      : isBtts
-        ? Number((metrics?.hits ?? 0) + (metrics?.misses ?? 0))
-        : Number((metrics?.wins ?? 0) + (metrics?.draws ?? 0) + (metrics?.losses ?? 0))
+      : Number((metrics?.wins ?? 0) + (metrics?.draws ?? 0) + (metrics?.losses ?? 0))
   const hits = isOverUnder
     ? Number(metrics?.over ?? 0)
-    : isDoubleChance
+    : (isDoubleChance || isBtts || isWeh || isWbh)
       ? Number(metrics?.hits ?? 0)
-      : isBtts
-        ? Number(metrics?.hits ?? 0)
-        : Number(metrics?.wins ?? 0)
+      : Number(metrics?.wins ?? 0)
   const percent = total > 0 ? Math.round((hits / total) * 100) : 0
   const hitRateLabel = `${hits}/${total} (${percent}%)`
   const hitRateToneClass = percent > 50 ? 'metrics-hit-rate--positive' : percent < 50 ? 'metrics-hit-rate--negative' : ''
@@ -98,6 +96,28 @@ function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts,
     )
   }
 
+  if (isWeh) {
+    return (
+      <div>
+        <strong>{title}</strong>
+        <div>Hit Rate: <span className={`metrics-hit-rate ${hitRateToneClass}`}>{hitRateLabel}</span></div>
+        <div>Won Half: {metrics?.hits ?? 0}</div>
+        <div>No Half Won: {metrics?.misses ?? 0}</div>
+      </div>
+    )
+  }
+
+  if (isWbh) {
+    return (
+      <div>
+        <strong>{title}</strong>
+        <div>Hit Rate: <span className={`metrics-hit-rate ${hitRateToneClass}`}>{hitRateLabel}</span></div>
+        <div>Won Both: {metrics?.hits ?? 0}</div>
+        <div>Did Not Win Both: {metrics?.misses ?? 0}</div>
+      </div>
+    )
+  }
+
   return (
     <div>
       <strong>{title}</strong>
@@ -114,6 +134,8 @@ export default function MetricsPanel({ betType = '1X2', metrics, sampleSize, sam
   const isOverUnder = isOverUnderFamilyBetType(normalizedBetType)
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
   const isBtts = normalizedBetType === BET_TYPE_BTTS
+  const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
+  const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
   const isCorners = normalizedBetType === BET_TYPE_CORNERS
 
   return (
@@ -127,6 +149,8 @@ export default function MetricsPanel({ betType = '1X2', metrics, sampleSize, sam
           isOverUnder={isOverUnder}
           isDoubleChance={isDoubleChance}
           isBtts={isBtts}
+          isWeh={isWeh}
+          isWbh={isWbh}
           isCorners={isCorners}
         />
         <TeamMetricsBlock
@@ -135,6 +159,8 @@ export default function MetricsPanel({ betType = '1X2', metrics, sampleSize, sam
           isOverUnder={isOverUnder}
           isDoubleChance={isDoubleChance}
           isBtts={isBtts}
+          isWeh={isWeh}
+          isWbh={isWbh}
           isCorners={isCorners}
         />
       </div>

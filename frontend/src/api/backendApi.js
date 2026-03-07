@@ -144,6 +144,60 @@ export async function getWorkspaceBtts({
   })
 }
 
+export async function getWorkspaceWinBothHalves({
+  match_id,
+  home_team_id,
+  away_team_id,
+  home_team_name = '',
+  away_team_name = '',
+  league_id = '',
+  limit = 0,
+  filters = {},
+  evidenceFilters = [],
+}) {
+  return requestJson('/api/workspace/win_both_halves', {
+    method: 'POST',
+    body: JSON.stringify({
+      match_id,
+      home_team_id,
+      away_team_id,
+      home_team_name,
+      away_team_name,
+      league_id,
+      limit,
+      filters,
+      evidenceFilters,
+    }),
+  })
+}
+
+export async function getWorkspaceWinEitherHalf({
+  match_id,
+  home_team_id,
+  away_team_id,
+  home_team_name = '',
+  away_team_name = '',
+  league_id = '',
+  limit = 0,
+  filters = {},
+  evidenceFilters = [],
+}) {
+  return requestJson('/api/workspace/win_either_half', {
+    method: 'POST',
+    body: JSON.stringify({
+      match_id,
+      home_team_id,
+      away_team_id,
+      home_team_name,
+      away_team_name,
+      league_id,
+      limit,
+      filters,
+      evidenceFilters,
+    }),
+  })
+}
+
 export async function getWorkspaceHomeOu({
   match_id,
   home_team_id,
@@ -266,6 +320,8 @@ export default {
   getWorkspaceOverUnder,
   getWorkspaceDoubleChance,
   getWorkspaceBtts,
+  getWorkspaceWinEitherHalf,
+  getWorkspaceWinBothHalves,
   getWorkspaceHomeOu,
   getWorkspaceAwayOu,
   getWorkspaceCorners,

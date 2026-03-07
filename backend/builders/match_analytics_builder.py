@@ -157,6 +157,11 @@ class MatchAnalyticsBuilder:
             "penalty_goals_home": int(match_df["penalty_goals_home"].iloc[0]) if "penalty_goals_home" in match_df.columns else 0,
             "penalty_goals_away": int(match_df["penalty_goals_away"].iloc[0]) if "penalty_goals_away" in match_df.columns else 0,
             "total_penalty_goals": int(match_df["total_penalty_goals"].iloc[0]) if "total_penalty_goals" in match_df.columns else 0,
+            # Half-time goal features for Win Either Half bet type
+            "home_h1_goals": int(match_df["home_h1_goals"].iloc[0]) if "home_h1_goals" in match_df.columns else 0,
+            "home_h2_goals": int(match_df["home_h2_goals"].iloc[0]) if "home_h2_goals" in match_df.columns else 0,
+            "away_h1_goals": int(match_df["away_h1_goals"].iloc[0]) if "away_h1_goals" in match_df.columns else 0,
+            "away_h2_goals": int(match_df["away_h2_goals"].iloc[0]) if "away_h2_goals" in match_df.columns else 0,
         }
 
         self.feature_keys.update(available_features.keys())

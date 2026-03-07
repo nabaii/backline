@@ -82,16 +82,6 @@ export default function KitchenPage() {
         const firstLeague = nextLeagues?.[0]?.id || null
         setSelectedLeague(firstLeague)
 
-        // Warm cache for faster league switches.
-        Promise.allSettled(
-          nextLeagues.map(async (league) => {
-            if (!league?.id || league.id === firstLeague || fixturesCacheRef.current.has(league.id)) return
-            const response = await getFixturesForLeague(league.id, fixturesDateRef.current)
-            const nextFixtures = response.fixtures || []
-            fixturesCacheRef.current.set(league.id, nextFixtures)
-          })
-        ).catch(() => { })
-
         if (!firstLeague) {
           setIsLeagueLoading(false)
         }

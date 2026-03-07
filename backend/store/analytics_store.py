@@ -41,7 +41,14 @@ class AnalyticsStore(AnalyticsStoreContract):
 
     def _get_required_columns(self, filters: List[FilterSpec]) -> set:
         """Collect all required columns from backend.filters."""
-        columns = {"match_id", "team_id", "venue", "home_team_id", "away_team_id"}  # Base columns always included
+        columns = {
+            "match_id", "team_id", "venue", "home_team_id", "away_team_id",
+            # Overlay-relevant columns – always materialised so overlay lines render correctly
+            "expected_goals_home", "expected_goals_away",
+            "home_momentum", "away_momentum",
+            "ball_possession_home", "ball_possession_away",
+            "field_tilt_home", "field_tilt_away",
+        }
         for f in filters:
             if f.required_columns:
                 columns.update(f.required_columns)
@@ -95,15 +102,31 @@ class AnalyticsStore(AnalyticsStoreContract):
         # Check both required_columns and extra_features
         if "goals_scored" in required_columns or (extra_features and "goals_scored" in extra_features):
             row["goals_scored"] = ma.get_feature(goals_col)
-        
+
         # Add opponent_goals if needed (opposite team's goals)
         # Check both required_columns and extra_features
         if "opponent_goals" in required_columns or (extra_features and "opponent_goals" in extra_features):
             row["opponent_goals"] = ma.get_feature(opponent_goals_col)
 
+        # Perspective-aware half-time goals for Win Either Half bet type
+        _half_cols_needed = required_columns | set(extra_features or [])
+        if {"team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"} & _half_cols_needed:
+            h1_team_col = "home_h1_goals" if venue == "home" else "away_h1_goals"
+            h1_opp_col = "away_h1_goals" if venue == "home" else "home_h1_goals"
+            h2_team_col = "home_h2_goals" if venue == "home" else "away_h2_goals"
+            h2_opp_col = "away_h2_goals" if venue == "home" else "home_h2_goals"
+            if "team_h1_goals" in _half_cols_needed and h1_team_col in ma.available_features:
+                row["team_h1_goals"] = ma.get_feature(h1_team_col)
+            if "opponent_h1_goals" in _half_cols_needed and h1_opp_col in ma.available_features:
+                row["opponent_h1_goals"] = ma.get_feature(h1_opp_col)
+            if "team_h2_goals" in _half_cols_needed and h2_team_col in ma.available_features:
+                row["team_h2_goals"] = ma.get_feature(h2_team_col)
+            if "opponent_h2_goals" in _half_cols_needed and h2_opp_col in ma.available_features:
+                row["opponent_h2_goals"] = ma.get_feature(h2_opp_col)
+
         # Add required feature columns used by filters.
         for feat in required_columns:
-            if feat in row or feat in ("goals_scored", "opponent_goals"):
+            if feat in row or feat in ("goals_scored", "opponent_goals", "team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"):
                 continue
             if feat in ma.available_features:
                 row[feat] = ma.get_feature(feat)
@@ -112,7 +135,7 @@ class AnalyticsStore(AnalyticsStoreContract):
         if extra_features:
             for feat in extra_features:
                 # Skip opponent_goals and goals_scored as they are handled above
-                if feat in ("opponent_goals", "goals_scored"):
+                if feat in ("opponent_goals", "goals_scored", "team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"):
                     continue
                 if feat in ma.available_features:
                     row[feat] = ma.get_feature(feat)

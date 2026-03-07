@@ -22,6 +22,8 @@ const BET_TYPE_BTTS = 'btts'
 const BET_TYPE_HOME_OU = 'home_ou'
 const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
+const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
 
 function defaultTeamViewForBetType(betType) {
   if (betType === BET_TYPE_HOME_OU) return DEFAULT_CHART_TEAM_VIEW
@@ -382,6 +384,12 @@ export default function BetTypeWorkspace({
       if (betType === BET_TYPE_BTTS) {
         return api.getWorkspaceBtts(requestPayload)
       }
+      if (betType === BET_TYPE_WIN_EITHER_HALF) {
+        return api.getWorkspaceWinEitherHalf(requestPayload)
+      }
+      if (betType === BET_TYPE_WIN_BOTH_HALVES) {
+        return api.getWorkspaceWinBothHalves(requestPayload)
+      }
       if (betType === BET_TYPE_CORNERS) {
         return api.getWorkspaceCorners({ ...requestPayload, line: appliedCornersLine })
       }
@@ -446,6 +454,8 @@ export default function BetTypeWorkspace({
           <button className={betType === BET_TYPE_HOME_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_HOME_OU)}>Home O/U</button>
           <button className={betType === BET_TYPE_AWAY_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_AWAY_OU)}>Away O/U</button>
           <button className={betType === BET_TYPE_CORNERS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_CORNERS)}>Corners</button>
+          <button className={betType === BET_TYPE_WIN_EITHER_HALF ? 'active' : ''} onClick={() => setBetType(BET_TYPE_WIN_EITHER_HALF)}>Win Either Half</button>
+          <button className={betType === BET_TYPE_WIN_BOTH_HALVES ? 'active' : ''} onClick={() => setBetType(BET_TYPE_WIN_BOTH_HALVES)}>Win Both Halves</button>
         </div>
       </div>
 

@@ -15,6 +15,8 @@ const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
 const BET_TYPE_BTTS = 'btts'
 const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
+const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
 const VIEW_BOTH = 'both'
 const VIEW_HOME = 'home'
 const VIEW_AWAY = 'away'
@@ -174,6 +176,50 @@ function buildBttsBars(matches = []) {
       btts_result: isBtts ? 'Y' : 'N',
       goals_scored: Number(m.goals_scored ?? 0),
       opponent_goals: Number(m.opponent_goals ?? 0),
+      match_id: m.match_id,
+      ...buildBaseMatchFields(m, fallbackOpponent),
+    }
+  })
+}
+
+function buildWehBars(matches = []) {
+  return matches.map((m, idx) => {
+    const fallbackOpponent = `Opponent ${m.opponent_id ?? idx + 1}`
+    const label = m.chart_label || (m.venue === 'away' ? `@ ${m.opponent_name || fallbackOpponent}` : `vs ${m.opponent_name || fallbackOpponent}`)
+    const wonEither = m.weh_result
+      ? m.weh_result === 'Y'
+      : (Number(m.team_h1_goals ?? 0) > Number(m.opponent_h1_goals ?? 0) || Number(m.team_h2_goals ?? 0) > Number(m.opponent_h2_goals ?? 0))
+    return {
+      label,
+      value: wonEither ? 1.0 : 0.1,
+      color: wonEither ? '#2ecc71' : '#e74c3c',
+      weh_result: wonEither ? 'Y' : 'N',
+      team_h1_goals: Number(m.team_h1_goals ?? 0),
+      opponent_h1_goals: Number(m.opponent_h1_goals ?? 0),
+      team_h2_goals: Number(m.team_h2_goals ?? 0),
+      opponent_h2_goals: Number(m.opponent_h2_goals ?? 0),
+      match_id: m.match_id,
+      ...buildBaseMatchFields(m, fallbackOpponent),
+    }
+  })
+}
+
+function buildWbhBars(matches = []) {
+  return matches.map((m, idx) => {
+    const fallbackOpponent = `Opponent ${m.opponent_id ?? idx + 1}`
+    const label = m.chart_label || (m.venue === 'away' ? `@ ${m.opponent_name || fallbackOpponent}` : `vs ${m.opponent_name || fallbackOpponent}`)
+    const wonBoth = m.wbh_result
+      ? m.wbh_result === 'Y'
+      : (Number(m.team_h1_goals ?? 0) > Number(m.opponent_h1_goals ?? 0) && Number(m.team_h2_goals ?? 0) > Number(m.opponent_h2_goals ?? 0))
+    return {
+      label,
+      value: wonBoth ? 1.0 : 0.1,
+      color: wonBoth ? '#2ecc71' : '#e74c3c',
+      wbh_result: wonBoth ? 'Y' : 'N',
+      team_h1_goals: Number(m.team_h1_goals ?? 0),
+      opponent_h1_goals: Number(m.opponent_h1_goals ?? 0),
+      team_h2_goals: Number(m.team_h2_goals ?? 0),
+      opponent_h2_goals: Number(m.opponent_h2_goals ?? 0),
       match_id: m.match_id,
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
@@ -511,6 +557,10 @@ function computeHitRate(rows, betType) {
     hits = rows.filter(row => row.corners_over_under_result === 'O').length
   } else if (normalizedBetType === BET_TYPE_BTTS) {
     hits = rows.filter(row => row.btts_result === 'Y').length
+  } else if (normalizedBetType === BET_TYPE_WIN_EITHER_HALF) {
+    hits = rows.filter(row => row.weh_result === 'Y').length
+  } else if (normalizedBetType === BET_TYPE_WIN_BOTH_HALVES) {
+    hits = rows.filter(row => row.wbh_result === 'Y').length
   } else if (normalizedBetType === BET_TYPE_DOUBLE_CHANCE) {
     hits = rows.filter(row => row.double_chance_result === 'H').length
   } else {
@@ -588,6 +638,12 @@ function getAverageMetricLabel(betType) {
   }
   if (normalizedBetType === BET_TYPE_BTTS) {
     return 'BTTS Avg'
+  }
+  if (normalizedBetType === BET_TYPE_WIN_EITHER_HALF) {
+    return 'WEH Avg'
+  }
+  if (normalizedBetType === BET_TYPE_WIN_BOTH_HALVES) {
+    return 'WBH Avg'
   }
   return 'Outcome Avg'
 }
@@ -713,8 +769,10 @@ function TeamBarChart({
   const isLineType = isOverUnder || isCorners
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
   const isBtts = normalizedBetType === BET_TYPE_BTTS
+  const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
+  const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
   const rawSeriesMax = readSeriesMax(data)
-  const referenceLineValue = isLineType ? line : (!isDoubleChance && !isBtts ? 0.5 : null)
+  const referenceLineValue = isLineType ? line : (!isDoubleChance && !isBtts && !isWeh && !isWbh ? 0.5 : null)
   const rawDomainMax = isLineType
     ? Math.max(rawSeriesMax, line, isCorners ? CORNERS_LINE_MIN : OVER_UNDER_LINE_MIN)
     : Math.max(rawSeriesMax, 1) * 1.08
@@ -957,6 +1015,12 @@ function TeamBarChart({
                   if (isBtts) {
                     return [Number(val).toFixed(1), 'BTTS']
                   }
+                  if (isWeh) {
+                    return [Number(val).toFixed(1), 'Win Either Half']
+                  }
+                  if (isWbh) {
+                    return [Number(val).toFixed(1), 'Win Both Halves']
+                  }
                   if (isDoubleChance) {
                     return [Number(val).toFixed(1), 'Double Chance']
                   }
@@ -979,6 +1043,18 @@ function TeamBarChart({
                   if (isBtts) {
                     const bttsLabel = row.btts_result === 'Y' ? 'BTTS Yes' : 'BTTS No'
                     return `${row.fixture_display} | ${row.date_label} | ${bttsLabel} | ${Number(row.goals_scored ?? 0)}-${Number(row.opponent_goals ?? 0)}`
+                  }
+                  if (isWeh) {
+                    const wehLabel = row.weh_result === 'Y' ? 'Won Half' : 'No Half Won'
+                    const h1 = `H1: ${Number(row.team_h1_goals ?? 0)}-${Number(row.opponent_h1_goals ?? 0)}`
+                    const h2 = `H2: ${Number(row.team_h2_goals ?? 0)}-${Number(row.opponent_h2_goals ?? 0)}`
+                    return `${row.fixture_display} | ${row.date_label} | ${wehLabel} | ${h1}, ${h2}`
+                  }
+                  if (isWbh) {
+                    const wbhLabel = row.wbh_result === 'Y' ? 'Won Both' : 'Did Not Win Both'
+                    const h1 = `H1: ${Number(row.team_h1_goals ?? 0)}-${Number(row.opponent_h1_goals ?? 0)}`
+                    const h2 = `H2: ${Number(row.team_h2_goals ?? 0)}-${Number(row.opponent_h2_goals ?? 0)}`
+                    return `${row.fixture_display} | ${row.date_label} | ${wbhLabel} | ${h1}, ${h2}`
                   }
                   return `${row.fixture_display} | ${row.date_label} | Result ${row.result}`
                 }}
@@ -1010,7 +1086,7 @@ function TeamBarChart({
                   onClick={onReferenceLineClick}
                   onContextMenu={onReferenceLineContextMenu}
                 />
-              ) : (!isDoubleChance && !isBtts) ? (
+              ) : (!isDoubleChance && !isBtts && !isWeh && !isWbh) ? (
                 <ReferenceLine yAxisId="left" y={referenceLineValue} stroke="#f8c629" strokeWidth={2} />
               ) : null}
             </ComposedChart>
@@ -1070,6 +1146,8 @@ export default function ChartArea({
   const isLineType = isOverUnder || isCorners
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
   const isBtts = normalizedBetType === BET_TYPE_BTTS
+  const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
+  const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
   const line = isCorners ? normalizeCornersLineValue(cornersLine) : normalizeLineValue(overUnderLine)
   const layoutVersion = isFiltersOpen ? 'open' : 'closed'
 
@@ -1123,13 +1201,17 @@ export default function ChartArea({
       bars = buildOverUnderBars(recentMatches?.home || [], line, normalizedBetType)
     } else if (isBtts) {
       bars = buildBttsBars(recentMatches?.home || [])
+    } else if (isWeh) {
+      bars = buildWehBars(recentMatches?.home || [])
+    } else if (isWbh) {
+      bars = buildWbhBars(recentMatches?.home || [])
     } else if (isDoubleChance) {
       bars = buildDoubleChanceBars(recentMatches?.home || [])
     } else {
       bars = buildOneXTwoBars(recentMatches?.home || [])
     }
     return enrichWithOverlay(bars, overlayConfig)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isDoubleChance, line, normalizedBetType, overlayConfig])
+  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfig])
 
   const awayData = useMemo(() => {
     let bars
@@ -1139,13 +1221,17 @@ export default function ChartArea({
       bars = buildOverUnderBars(recentMatches?.away || [], line, normalizedBetType)
     } else if (isBtts) {
       bars = buildBttsBars(recentMatches?.away || [])
+    } else if (isWeh) {
+      bars = buildWehBars(recentMatches?.away || [])
+    } else if (isWbh) {
+      bars = buildWbhBars(recentMatches?.away || [])
     } else if (isDoubleChance) {
       bars = buildDoubleChanceBars(recentMatches?.away || [])
     } else {
       bars = buildOneXTwoBars(recentMatches?.away || [])
     }
     return enrichWithOverlay(bars, overlayConfig)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isDoubleChance, line, normalizedBetType, overlayConfig])
+  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfig])
 
   return (
     <div className="chart-area">

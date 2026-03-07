@@ -15,7 +15,11 @@
       "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json''\\)\\); m=data[list\\(data.keys\\(\\)\\)[0]]; print\\(json.dumps\\({k:v for k,v in m.items\\(\\) if ''penal'' in k.lower\\(\\) or ''pen'' in k.lower\\(\\)}, indent=2\\)\\)\")",
       "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json'', encoding=''utf-8''\\)\\); m=data[list\\(data.keys\\(\\)\\)[0]]; print\\(json.dumps\\({k:v for k,v in m.items\\(\\) if ''penal'' in k.lower\\(\\) or ''pen'' in k.lower\\(\\)}, indent=2\\)\\)\")",
       "Bash(python -c \"import json; data=json.load\\(open\\(''data/raw/leagues/england_premier_league/matches_data.json'', encoding=''utf-8''\\)\\); m=data[0]; print\\(json.dumps\\(list\\(m.keys\\(\\)\\), indent=2\\)\\)\")",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(python data/raw/scrape_data.py --league \"Italy Serie A\" --refresh-shots)",
+      "Bash(python data/raw/scrape_data.py --league \"France Ligue 1\" --refresh-shots)",
+      "Bash(curl -s -X POST http://localhost:5000/api/workspace/btts -H \"Content-Type: application/json\" -d '{\"\"match_id\"\":14025013,\"\"home_team_id\"\":44,\"\"away_team_id\"\":60,\"\"filters\"\":{},\"\"evidenceFilters\"\":[]}')",
+      "Bash(python -c \"import backend.backend_api; print\\(''OK''\\)\")"
     ]
   }
 }
