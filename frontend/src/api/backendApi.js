@@ -339,6 +339,62 @@ export async function chatStream({ query, home_team_id, away_team_id, home_team_
   }
 }
 
+/**
+ * Upload a bet slip image for OCR + analysis.
+ * Streams newline-delimited JSON events.
+ * @param {File} imageFile - the image file to upload
+ * @param {string} leagueId - optional league_id for team matching
+ * @param {function} onEvent - called with each parsed JSON event
+ * @returns {Promise<void>}
+ */
+export async function analyzeBetSlip(imageFile, leagueId = '', onEvent) {
+  const formData = new FormData()
+  formData.append('image', imageFile)
+  if (leagueId) formData.append('league_id', leagueId)
+
+  const response = await fetch(`${API_BASE}/api/betslip/analyze`, {
+    method: 'POST',
+    body: formData,
+  })
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    throw new Error(payload.error || `Request failed (${response.status})`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    // Split on newlines to parse NDJSON
+    const lines = buffer.split('\n')
+    buffer = lines.pop() // keep incomplete line in buffer
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      try {
+        onEvent(JSON.parse(trimmed))
+      } catch {
+        // skip unparseable lines
+      }
+    }
+  }
+
+  // Flush remaining buffer
+  if (buffer.trim()) {
+    try {
+      onEvent(JSON.parse(buffer.trim()))
+    } catch {
+      // skip
+    }
+  }
+}
+
 export default {
   getLeagues,
   getFixturesForLeague,
@@ -354,4 +410,5 @@ export default {
   getWorkspaceCorners,
   ragStream,
   chatStream,
+  analyzeBetSlip,
 }

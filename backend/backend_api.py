@@ -4468,6 +4468,51 @@ def create_app() -> Flask:
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
+    # ── Bet slip analysis endpoint ────────────────────────────────────────────
+    _betslip_analyzer: Any = None
+
+    @app.route("/api/betslip/analyze", methods=["POST", "OPTIONS"])
+    def betslip_analyze():
+        """
+        Upload a bet slip image for OCR + workspace analysis.
+        Accepts multipart/form-data with an 'image' file and optional 'league_id'.
+        Streams newline-delimited JSON events.
+        """
+        nonlocal _betslip_analyzer
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.betslip_analyzer import BetSlipAnalyzer
+
+        image_file = request.files.get("image")
+        if not image_file:
+            return jsonify({"error": "image file is required"}), 400
+
+        league_id = request.form.get("league_id", "")
+        mime_type = image_file.content_type or "image/png"
+
+        import base64
+        image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+
+        if _betslip_analyzer is None:
+            _betslip_analyzer = BetSlipAnalyzer()
+
+        def generate():
+            try:
+                for event in _betslip_analyzer.analyze_slip(
+                    image_b64, mime_type=mime_type, league_id=league_id,
+                ):
+                    yield event
+            except Exception as exc:
+                yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
     # ── RAG query endpoint (legacy) ───────────────────────────────────────────
     _rag_pipeline: Any = None  # lazy-init on first request
 

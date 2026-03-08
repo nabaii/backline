@@ -1,8 +1,74 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { chatStream } from '../api/backendApi'
+import React, { useEffect, useRef, useState, useCallback } from 'react'
+import { chatStream, analyzeBetSlip } from '../api/backendApi'
 import ChatMiniChart from './ChatMiniChart'
+import BetSlipThread from './BetSlipThread'
 
 const CHART_DELIMITER = '\n---CHART_DATA---\n'
+
+const GREETING_PHRASES = [
+  'What are we cooking up today?',
+  'What do you want to bet?',
+  'Upload and analyse your bet slip',
+]
+const TYPE_SPEED = 60
+const ERASE_SPEED = 35
+const PAUSE_AFTER_TYPE = 2000
+const PAUSE_AFTER_ERASE = 400
+
+function useTypewriter(phrases) {
+  const [display, setDisplay] = useState('')
+  const [showCursor, setShowCursor] = useState(true)
+  const phraseIdx = useRef(0)
+  const charIdx = useRef(0)
+  const isErasing = useRef(false)
+  const timerRef = useRef(null)
+
+  useEffect(() => {
+    const tick = () => {
+      const current = phrases[phraseIdx.current]
+
+      if (!isErasing.current) {
+        // Typing
+        charIdx.current++
+        setDisplay(current.slice(0, charIdx.current))
+
+        if (charIdx.current >= current.length) {
+          // Done typing — pause then erase
+          timerRef.current = setTimeout(() => {
+            isErasing.current = true
+            tick()
+          }, PAUSE_AFTER_TYPE)
+          return
+        }
+        timerRef.current = setTimeout(tick, TYPE_SPEED)
+      } else {
+        // Erasing
+        charIdx.current--
+        setDisplay(current.slice(0, charIdx.current))
+
+        if (charIdx.current <= 0) {
+          // Done erasing — move to next phrase
+          isErasing.current = false
+          phraseIdx.current = (phraseIdx.current + 1) % phrases.length
+          timerRef.current = setTimeout(tick, PAUSE_AFTER_ERASE)
+          return
+        }
+        timerRef.current = setTimeout(tick, ERASE_SPEED)
+      }
+    }
+
+    timerRef.current = setTimeout(tick, PAUSE_AFTER_ERASE)
+    return () => clearTimeout(timerRef.current)
+  }, [phrases])
+
+  // Blink cursor
+  useEffect(() => {
+    const id = setInterval(() => setShowCursor(v => !v), 530)
+    return () => clearInterval(id)
+  }, [])
+
+  return { display, showCursor }
+}
 
 export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
   const [messages, setMessages] = useState([])
@@ -10,10 +76,12 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
   const [isStreaming, setIsStreaming] = useState(false)
   const textareaRef = useRef(null)
   const messagesEndRef = useRef(null)
+  const fileInputRef = useRef(null)
   const abortRef = useRef(false)
   // Buffer to accumulate chunks until we find the delimiter
   const bufferRef = useRef('')
   const chartParsedRef = useRef(false)
+  const { display: greetingText, showCursor: greetingCursor } = useTypewriter(GREETING_PHRASES)
 
   const hasMessages = messages.length > 0
   const fixtureLabel = selectedFixture
@@ -123,6 +191,121 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
     }
   }
 
+  // ── Bet slip upload handler ──
+  const handleBetSlipUpload = async (file) => {
+    if (!file || isStreaming) return
+
+    // Create a preview URL for the image
+    const imageUrl = URL.createObjectURL(file)
+
+    const userMsg = { role: 'user', text: '', imageUrl, imageName: file.name }
+    const assistantMsg = {
+      role: 'assistant',
+      text: '',
+      betSlip: { analyses: [], extractedCount: 0, isProcessing: true },
+    }
+
+    setMessages(prev => [...prev, userMsg, assistantMsg])
+    setIsStreaming(true)
+    abortRef.current = false
+
+    try {
+      await analyzeBetSlip(
+        file,
+        selectedFixture?.league_id || '',
+        (event) => {
+          if (abortRef.current) return
+
+          if (event.type === 'bets_extracted') {
+            setMessages(prev => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last?.betSlip) {
+                next[next.length - 1] = {
+                  ...last,
+                  betSlip: {
+                    ...last.betSlip,
+                    extractedCount: event.count,
+                  },
+                }
+              }
+              return next
+            })
+          } else if (event.type === 'analysis') {
+            setMessages(prev => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last?.betSlip) {
+                next[next.length - 1] = {
+                  ...last,
+                  betSlip: {
+                    ...last.betSlip,
+                    analyses: [...last.betSlip.analyses, event.data],
+                  },
+                }
+              }
+              return next
+            })
+          } else if (event.type === 'done') {
+            setMessages(prev => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last?.betSlip) {
+                next[next.length - 1] = {
+                  ...last,
+                  betSlip: { ...last.betSlip, isProcessing: false },
+                }
+              }
+              return next
+            })
+          } else if (event.type === 'error') {
+            setMessages(prev => {
+              const next = [...prev]
+              const last = next[next.length - 1]
+              if (last?.betSlip) {
+                next[next.length - 1] = {
+                  ...last,
+                  text: `Error: ${event.message}`,
+                  error: true,
+                  betSlip: { ...last.betSlip, isProcessing: false },
+                }
+              }
+              return next
+            })
+          }
+        }
+      )
+    } catch (err) {
+      if (!abortRef.current) {
+        setMessages(prev => {
+          const next = [...prev]
+          const last = next[next.length - 1]
+          if (last?.role === 'assistant') {
+            next[next.length - 1] = {
+              ...last,
+              text: `Error: ${err.message}`,
+              error: true,
+              betSlip: last.betSlip
+                ? { ...last.betSlip, isProcessing: false }
+                : undefined,
+            }
+          }
+          return next
+        })
+      }
+    } finally {
+      setIsStreaming(false)
+    }
+  }
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleBetSlipUpload(file)
+      e.target.value = '' // reset so same file can be re-uploaded
+    }
+  }
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -150,29 +333,38 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
       {!hasMessages ? (
         <div className="chat-empty-state">
           <div className="chat-greeting">
-            <span className="chat-greeting-star">✦</span>
-            <h2 className="chat-greeting-text">What do you want to bet?</h2>
+            <h2 className="chat-greeting-text">
+              {greetingText}
+              <span className={`chat-greeting-cursor${greetingCursor ? '' : ' chat-greeting-cursor--hidden'}`}>|</span>
+            </h2>
           </div>
-          {fixtureLabel && (
-            <p className="chat-fixture-hint">
-              Selected: <strong>{fixtureLabel}</strong>
-            </p>
-          )}
         </div>
       ) : (
         <div className="chat-messages">
           {messages.map((msg, i) => (
             <React.Fragment key={i}>
+              {/* User image message */}
+              {msg.imageUrl && (
+                <div className="chat-message chat-message--user chat-message--image">
+                  <img
+                    src={msg.imageUrl}
+                    alt={msg.imageName || 'Bet slip'}
+                    className="chat-betslip-image"
+                  />
+                </div>
+              )}
               {/* Text message */}
-              <div
-                className={`chat-message chat-message--${msg.role}${msg.error ? ' chat-message--error' : ''}`}
-              >
-                {msg.text
-                  ? msg.text
-                  : msg.role === 'assistant'
-                    ? <span className="chat-typing-cursor" />
-                    : null}
-              </div>
+              {(msg.text || (!msg.imageUrl && !msg.betSlip)) && (
+                <div
+                  className={`chat-message chat-message--${msg.role}${msg.error ? ' chat-message--error' : ''}`}
+                >
+                  {msg.text
+                    ? msg.text
+                    : msg.role === 'assistant'
+                      ? <span className="chat-typing-cursor" />
+                      : null}
+                </div>
+              )}
               {/* Chart as a separate "message" below the text */}
               {msg.chartData?.recent_matches?.length > 0 && (
                 <div className="chat-message chat-message--chart">
@@ -185,11 +377,30 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
                   />
                 </div>
               )}
+              {/* Bet slip thread */}
+              {msg.betSlip && (
+                <div className="chat-message chat-message--chart">
+                  <BetSlipThread
+                    analyses={msg.betSlip.analyses}
+                    extractedCount={msg.betSlip.extractedCount}
+                    isProcessing={msg.betSlip.isProcessing}
+                    onNavigateToKitchen={onNavigateToKitchen}
+                  />
+                </div>
+              )}
             </React.Fragment>
           ))}
           <div ref={messagesEndRef} />
         </div>
       )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFileChange}
+        style={{ display: 'none' }}
+      />
 
       <div className="chat-input-wrap">
         <div className="chat-input-box">
@@ -207,14 +418,29 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
             {fixtureLabel && (
               <span className="chat-input-context">{fixtureLabel}</span>
             )}
-            <button
-              className="chat-send-btn"
-              onClick={handleSend}
-              disabled={!input.trim() || isStreaming}
-              aria-label="Send message"
-            >
-              {isStreaming ? <span className="chat-send-spinner" /> : '↑'}
-            </button>
+            <div className="chat-input-actions">
+              <button
+                className="chat-attach-btn"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isStreaming}
+                aria-label="Upload bet slip"
+                title="Upload bet slip"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <polyline points="21 15 16 10 5 21" />
+                </svg>
+              </button>
+              <button
+                className="chat-send-btn"
+                onClick={handleSend}
+                disabled={!input.trim() || isStreaming}
+                aria-label="Send message"
+              >
+                {isStreaming ? <span className="chat-send-spinner" /> : '\u2191'}
+              </button>
+            </div>
           </div>
         </div>
       </div>

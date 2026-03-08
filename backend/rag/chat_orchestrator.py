@@ -37,9 +37,16 @@ Given the user's question and fixture context, extract:
 Return ONLY valid JSON, no markdown:
 {"bet_type": "...", "line": ..., "outcome_type": ...}
 
-If the question is not about a specific betting market (e.g. general chat, \
-"best bet", greetings), return:
-{"bet_type": null, "line": null, "outcome_type": null}"""
+IMPORTANT — be intuitive. If the user asks about a team without naming a \
+specific market, infer the most relevant one:
+- "how does X play" / "how do X perform" / general team form → "over_under" (2.5)
+- "can X win" / "X vs Y" / "who wins" → "one_x_two"
+- "how do X play against similar teams" → "over_under" (2.5)
+- "corners" / "set pieces" → "corners"
+- "both teams score" / "BTTS" → "over_under" (0.5) with outcome_type null
+
+ONLY return null bet_type for truly non-football queries: greetings, \
+off-topic chat, or questions with zero football context."""
 
 _EXPLAIN_PROMPT = """\
 You are Backline, a football betting research assistant.
@@ -47,23 +54,33 @@ You are Backline, a football betting research assistant.
 You have structured analytics results from real match data.
 
 RESPONSE RULES — follow these strictly:
-- Keep responses to 2-4 sentences. Never write more than a short paragraph.
+- Keep responses to 3-4 sentences, plus a follow-up question. Never write \
+more than a short paragraph.
 - Lead with the key insight. No greetings, no filler, no "Great question!".
 - Pick the 2-3 most relevant stats and weave them into clear sentences. \
 Do not list every metric.
 - Explain *why* the numbers matter, not just what they are. Teach the user \
 something about the data.
+- Flag standout numbers: notably high or low hit rates, clear home/away \
+splits, or streaks in recent form. If something jumps out, say so.
 - Use plain language. Write like you're talking to a smart friend.
 - Always tie claims to specific stats from the results. Never speculate.
-- Do NOT make predictions, recommend bets, or say "best bet".
-- If the user asks for a "best bet", reply: "Backline doesn't select bets. \
-You steer the bet, and I'll help analyze the data behind it. \
-Tell me the market you're considering."
-- If the data is insufficient, say so briefly."""
+- Do NOT make predictions or say "best bet". You can analyse and present \
+data for any market — even if the user didn't name one explicitly. Be \
+intuitive: if the user asks a general question, present the data you have \
+and guide them deeper.
+- If the data is insufficient, say so briefly.
+- ALWAYS end your response with a short follow-up question that guides the \
+user toward a natural next step. Make it specific and actionable, e.g.: \
+"Want me to check how Villarreal's over 2.5 rate looks against opponents \
+ranked similarly to Elche?" or "Should I look at this from the away team's \
+perspective?" or "Want to see how this changes with a different line?"
+- Keep the conversation flowing. Your goal is to help the user explore the \
+data, not to block them."""
 
 _NO_MARKET_RESPONSE = (
-    "Backline doesn't select bets. You steer the bet, and I'll help analyze "
-    "the data behind it. Tell me the market you're considering."
+    "I need a fixture to work with. Select a match from the sidebar, "
+    "then ask me anything — I'll pull the data and break it down for you."
 )
 
 
@@ -367,10 +384,15 @@ class ChatOrchestrator:
             else ""
         )
 
+        # No fixture selected and no teams mentioned — can't do anything
+        if not request.home_team_id and not request.away_team_id and not fixture_ctx:
+            return _NO_MARKET_RESPONSE
+
         intent = self.parse_intent(request.query, fixture_ctx, model=request.model)
 
+        # If intent parser couldn't pick a market, default to over_under
         if intent.bet_type is None:
-            return _NO_MARKET_RESPONSE
+            intent = ParsedIntent(bet_type="over_under", line=2.5, outcome_type=None)
 
         metrics = self.query_workspace(intent, request)
         return self.explain(request.query, metrics, model=request.model)
@@ -385,11 +407,16 @@ class ChatOrchestrator:
             else ""
         )
 
-        intent = self.parse_intent(request.query, fixture_ctx, model=request.model)
-
-        if intent.bet_type is None:
+        # No fixture selected and no teams mentioned — can't do anything
+        if not request.home_team_id and not request.away_team_id and not fixture_ctx:
             yield _NO_MARKET_RESPONSE
             return
+
+        intent = self.parse_intent(request.query, fixture_ctx, model=request.model)
+
+        # If intent parser couldn't pick a market, default to over_under
+        if intent.bet_type is None:
+            intent = ParsedIntent(bet_type="over_under", line=2.5, outcome_type=None)
 
         metrics = self.query_workspace(intent, request)
 

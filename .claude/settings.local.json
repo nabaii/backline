@@ -19,7 +19,9 @@
       "Bash(python data/raw/scrape_data.py --league \"Italy Serie A\" --refresh-shots)",
       "Bash(python data/raw/scrape_data.py --league \"France Ligue 1\" --refresh-shots)",
       "Bash(curl -s -X POST http://localhost:5000/api/workspace/btts -H \"Content-Type: application/json\" -d '{\"\"match_id\"\":14025013,\"\"home_team_id\"\":44,\"\"away_team_id\"\":60,\"\"filters\"\":{},\"\"evidenceFilters\"\":[]}')",
-      "Bash(python -c \"import backend.backend_api; print\\(''OK''\\)\")"
+      "Bash(python -c \"import backend.backend_api; print\\(''OK''\\)\")",
+      "Bash(npx vite build --mode development)",
+      "Bash(python -c \"from backend.rag.betslip_analyzer import BetSlipAnalyzer; print\\(''OK''\\)\")"
     ]
   }
 }
