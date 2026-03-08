@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { memo } from 'react'
 
 const BET_TYPE_OVER_UNDER = 'over_under'
 const BET_TYPE_HOME_OU = 'home_ou'
@@ -129,7 +129,7 @@ function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts,
   )
 }
 
-export default function MetricsPanel({ betType = '1X2', metrics, sampleSize, sampleSizes }) {
+export default memo(function MetricsPanel({ betType = '1X2', metrics, sampleSize, sampleSizes }) {
   const normalizedBetType = String(betType).toLowerCase()
   const isOverUnder = isOverUnderFamilyBetType(normalizedBetType)
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
@@ -166,4 +166,4 @@ export default function MetricsPanel({ betType = '1X2', metrics, sampleSize, sam
       </div>
     </aside>
   )
-}
+})

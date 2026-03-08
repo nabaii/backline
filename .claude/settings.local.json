@@ -21,7 +21,15 @@
       "Bash(curl -s -X POST http://localhost:5000/api/workspace/btts -H \"Content-Type: application/json\" -d '{\"\"match_id\"\":14025013,\"\"home_team_id\"\":44,\"\"away_team_id\"\":60,\"\"filters\"\":{},\"\"evidenceFilters\"\":[]}')",
       "Bash(python -c \"import backend.backend_api; print\\(''OK''\\)\")",
       "Bash(npx vite build --mode development)",
-      "Bash(python -c \"from backend.rag.betslip_analyzer import BetSlipAnalyzer; print\\(''OK''\\)\")"
+      "Bash(python -c \"from backend.rag.betslip_analyzer import BetSlipAnalyzer; print\\(''OK''\\)\")",
+      "Bash(grep -n \"useState\\\\|useEffect\\\\|useMemo\\\\|useCallback\" frontend/src/components/*.jsx)",
+      "Bash(wc -l frontend/src/components/*.jsx)",
+      "Bash(grep -n \"class.*Workspace\" backend/bet_type/*/*.py)",
+      "Bash(grep -n \"useMemo\\\\|useCallback\\\\|React.memo\" frontend/src/components/*.jsx)",
+      "Bash(grep -n \"lazy\\\\|React.lazy\\\\|dynamic\" frontend/src/components/*.jsx frontend/src/*.jsx)",
+      "Bash(npm run build)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''backend/backend_api.py'', doraise=True\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''backend/backend_api.py'', doraise=True\\); py_compile.compile\\(''backend/rag/chat_orchestrator.py'', doraise=True\\); print\\(''Python OK''\\)\")"
     ]
   }
 }

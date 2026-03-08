@@ -25,6 +25,7 @@ from openai import OpenAI
 # ---------------------------------------------------------------------------
 
 _DEFAULT_MODEL = "gpt-4o"
+_INTENT_MODEL = "gpt-4o-mini"  # Cheaper/faster model for structured intent parsing
 
 _INTENT_PROMPT = """\
 You are an intent parser for a football betting analytics platform.
@@ -129,7 +130,7 @@ class ChatOrchestrator:
         user_msg = f"Fixture: {fixture_context}\nQuestion: {query}" if fixture_context else query
 
         response = self._client.chat.completions.create(
-            model=model,
+            model=_INTENT_MODEL,
             max_tokens=100,
             temperature=0,
             messages=[
@@ -285,15 +286,11 @@ class ChatOrchestrator:
         match_lookup = _match_name_index()
         rows: list[dict[str, Any]] = []
 
-        for _, row in df.iterrows():
+        for row in df.to_dict("records"):
             match_id = int(row.get("match_id", 0))
             venue = str(row.get("venue", ""))
             home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-            if venue == "home":
-                opponent_name = away_name
-            else:
-                opponent_name = home_name
+            opponent_name = away_name if venue == "home" else home_name
 
             entry: dict[str, Any] = {
                 "match_id": match_id,

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useMemo, useRef, useState, useCallback, memo } from 'react'
 import {
   ComposedChart, Bar, XAxis, YAxis, Tooltip, Line,
   ResponsiveContainer, ReferenceLine, Cell
@@ -1125,7 +1125,7 @@ function TeamBarChart({
   )
 }
 
-export default function ChartArea({
+export default memo(function ChartArea({
   recentMatches,
   allSeasonMatches,
   betType = '1X2',
@@ -1305,4 +1305,4 @@ export default function ChartArea({
       </div>
     </div>
   )
-}
+})

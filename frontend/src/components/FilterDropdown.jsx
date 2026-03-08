@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, memo } from 'react'
 
 const VIEW_BOTH = 'both'
 const VIEW_HOME = 'home'
@@ -144,7 +144,7 @@ function DualRangeSlider({ range, config, onDraftChange, onCommit }) {
   )
 }
 
-export default function FilterDropdown({
+export default memo(function FilterDropdown({
   value,
   onChange,
   onApply,
@@ -615,4 +615,4 @@ export default function FilterDropdown({
       </div>
     </div>
   )
-}
+})

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
+from time import monotonic
 from typing import Any
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -857,9 +858,35 @@ def _normalize_range(value: Any, default_low: float = 0.0, default_high: float =
     return (low, high)
 
 
-@lru_cache(maxsize=1)
+_raw_df_cache: dict[str, Any] = {"df": None, "ts": 0.0}
+_RAW_DF_TTL = 300  # seconds – refresh CSV data every 5 minutes
+
+def _extract_penalty_goals(series: pd.Series) -> pd.Series:
+    """Vectorized extraction of penalty_goals from shot payload strings."""
+    def _parse_one(raw):
+        if isinstance(raw, dict):
+            return int(raw.get("penalty_goals", 0))
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text:
+                try:
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        return int(payload.get("penalty_goals", 0))
+                except Exception:
+                    pass
+        return 0
+    return series.map(_parse_one, na_action="ignore").fillna(0).astype(int)
+
 def _load_raw_df() -> pd.DataFrame:
-    """Load and concatenate season data from all league directories."""
+    """Load and concatenate season data from all league directories.
+
+    Results are cached in memory and refreshed every _RAW_DF_TTL seconds.
+    """
+    now = monotonic()
+    if _raw_df_cache["df"] is not None and (now - _raw_df_cache["ts"]) < _RAW_DF_TTL:
+        return _raw_df_cache["df"]
+
     frames: list[pd.DataFrame] = []
 
     if LEAGUES_DIR.exists():
@@ -885,27 +912,12 @@ def _load_raw_df() -> pd.DataFrame:
     if "match_id" not in raw_df.columns and "game_id" in raw_df.columns:
         raw_df = raw_df.rename(columns={"game_id": "match_id"})
 
-    # Extract penalty goal counts from shot payloads for NPG support
+    # Extract penalty goal counts from shot payloads for NPG support (vectorized)
     for side in ("home", "away"):
         shots_col = f"{side}_shots"
         pg_col = f"penalty_goals_{side}"
         if shots_col in raw_df.columns and pg_col not in raw_df.columns:
-            pen_goals = []
-            for raw in raw_df[shots_col].tolist():
-                payload = None
-                if isinstance(raw, dict):
-                    payload = raw
-                elif isinstance(raw, str):
-                    text = raw.strip()
-                    if text:
-                        try:
-                            payload = json.loads(text)
-                        except Exception:
-                            payload = None
-                pen_goals.append(
-                    int(payload.get("penalty_goals", 0)) if isinstance(payload, dict) else 0
-                )
-            raw_df[pg_col] = pen_goals
+            raw_df[pg_col] = _extract_penalty_goals(raw_df[shots_col])
         elif pg_col not in raw_df.columns:
             raw_df[pg_col] = 0
 
@@ -914,11 +926,19 @@ def _load_raw_df() -> pd.DataFrame:
     if "total_penalty_goals" not in raw_df.columns:
         raw_df["total_penalty_goals"] = raw_df["penalty_goals_home"] + raw_df["penalty_goals_away"]
 
+    _raw_df_cache["df"] = raw_df
+    _raw_df_cache["ts"] = now
     return raw_df
 
 
-@lru_cache(maxsize=1)
+_store_cache: dict[str, Any] = {"store": None, "ts": 0.0}
+_STORE_TTL = 300  # seconds – aligned with _RAW_DF_TTL
+
 def _build_store() -> AnalyticsStore:
+    now = monotonic()
+    if _store_cache["store"] is not None and (now - _store_cache["ts"]) < _STORE_TTL:
+        return _store_cache["store"]
+
     raw_df = _load_raw_df()
     builder = MatchAnalyticsBuilder()
     analytics = [
@@ -928,6 +948,8 @@ def _build_store() -> AnalyticsStore:
 
     store = AnalyticsStore()
     store.ingest(analytics)
+    _store_cache["store"] = store
+    _store_cache["ts"] = now
     return store
 
 
@@ -1097,30 +1119,29 @@ def _historical_fixture_snapshot() -> FixtureSnapshot:
         fixture_df = fixture_df.sort_values(by="match_id", ascending=False)
     fixture_df = fixture_df.reset_index(drop=True)
 
+    has_datetime = "match_datetime" in fixture_df.columns
+    has_league = "league_slug" in fixture_df.columns
     rows: list[FixtureRow] = []
-    for idx, row in fixture_df.iterrows():
-        league_id = str(row.get("league_slug", "england_premier_league"))
+    for t in fixture_df.itertuples(index=False):
+        league_id = str(getattr(t, "league_slug", "england_premier_league")) if has_league else "england_premier_league"
 
-        # Try to use real kickoff datetime if available
-        kickoff_str = None
-        if "match_datetime" in row.index:
+        kickoff_str = ""
+        if has_datetime:
             try:
-                kickoff_str = pd.Timestamp(row["match_datetime"]).isoformat().replace("+00:00", "Z")
+                kickoff_str = pd.Timestamp(t.match_datetime).isoformat().replace("+00:00", "Z")
             except Exception:
-                pass
-        if not kickoff_str:
-            kickoff_str = ""
+                kickoff_str = ""
 
         rows.append(
             FixtureRow(
-                match_id=int(row["match_id"]),
+                match_id=int(t.match_id),
                 league_id=league_id,
                 gameweek=0,
                 kickoff=kickoff_str,
-                home_team_id=int(row["home_team_id"]),
-                away_team_id=int(row["away_team_id"]),
-                home_team_name=_format_team_name(str(row["home_team"])),
-                away_team_name=_format_team_name(str(row["away_team"])),
+                home_team_id=int(t.home_team_id),
+                away_team_id=int(t.away_team_id),
+                home_team_name=_format_team_name(str(t.home_team)),
+                away_team_name=_format_team_name(str(t.away_team)),
                 home_team_score=None,
                 away_team_score=None,
                 finished=True,
@@ -1173,11 +1194,11 @@ def _raw_team_name_index() -> dict[str, tuple[int, ...]]:
     raw_df = _load_raw_df()
     mapping: dict[str, set[int]] = {}
 
-    for _, row in raw_df.iterrows():
-        home_key = _normalize_team_name(str(row["home_team"]))
-        away_key = _normalize_team_name(str(row["away_team"]))
-        mapping.setdefault(home_key, set()).add(int(row["home_team_id"]))
-        mapping.setdefault(away_key, set()).add(int(row["away_team_id"]))
+    for t in raw_df.itertuples(index=False):
+        home_key = _normalize_team_name(str(t.home_team))
+        away_key = _normalize_team_name(str(t.away_team))
+        mapping.setdefault(home_key, set()).add(int(t.home_team_id))
+        mapping.setdefault(away_key, set()).add(int(t.away_team_id))
 
     return {k: tuple(sorted(v)) for k, v in mapping.items()}
 
@@ -1880,7 +1901,7 @@ def _build_match_datetime_index_from_df(df: pd.DataFrame) -> dict[int, pd.Timest
 
     enriched["match_id"] = enriched["match_id"].astype(int)
     enriched = enriched.sort_values("match_datetime").drop_duplicates(subset=["match_id"], keep="last")
-    return {int(row["match_id"]): row["match_datetime"] for _, row in enriched.iterrows()}
+    return dict(zip(enriched["match_id"].astype(int), enriched["match_datetime"]))
 
 
 @lru_cache(maxsize=1)
@@ -2080,10 +2101,7 @@ def _corner_total_override_by_match_id() -> dict[int, float]:
         return {}
 
     cleaned["match_id"] = cleaned["match_id"].astype(int)
-    return {
-        int(row["match_id"]): float(row["total_corners"])
-        for _, row in cleaned.iterrows()
-    }
+    return dict(zip(cleaned["match_id"].astype(int), cleaned["total_corners"].astype(float)))
 
 
 def _resolve_total_corners_series(df: pd.DataFrame) -> pd.Series:
@@ -2106,7 +2124,7 @@ def _resolve_total_corners_series(df: pd.DataFrame) -> pd.Series:
     return resolved
 
 
-def _resolve_total_corners_from_row(row: pd.Series) -> float:
+def _resolve_total_corners_from_row(row: dict[str, Any] | pd.Series) -> float:
     match_id = _safe_int(row.get("match_id"), -1)
     override = _corner_total_override_by_match_id().get(match_id)
     if override is not None:
@@ -2173,11 +2191,8 @@ def _match_name_index() -> dict[int, tuple[str, str]]:
     raw_df = _load_raw_df()
     match_df = raw_df[["match_id", "home_team", "away_team"]].drop_duplicates(subset=["match_id"])
     mapping: dict[int, tuple[str, str]] = {}
-    for _, row in match_df.iterrows():
-        match_id = int(row["match_id"])
-        home_name = _format_team_name(str(row["home_team"]))
-        away_name = _format_team_name(str(row["away_team"]))
-        mapping[match_id] = (home_name, away_name)
+    for t in match_df.itertuples(index=False):
+        mapping[int(t.match_id)] = (_format_team_name(str(t.home_team)), _format_team_name(str(t.away_team)))
     return mapping
 
 
@@ -2189,7 +2204,7 @@ def _safe_optional_float(value: Any) -> float | None:
 
 
 def _resolve_team_opponent_values(
-    row: pd.Series,
+    row: dict[str, Any],
     venue: str,
     home_key: str,
     away_key: str,
@@ -2220,7 +2235,7 @@ def _opponent_rank_maps_for_league(league_id: str) -> dict[str, dict[str, int]]:
 
 
 def _build_overlay_metrics_from_row(
-    row: pd.Series,
+    row: dict[str, Any],
     venue: str,
     opponent_name: str,
     league_id: str | None = None,
@@ -2272,13 +2287,32 @@ def _build_overlay_metrics_from_row(
     return overlay_payload
 
 
+def _format_match_date(match_datetime) -> str:
+    if match_datetime is None:
+        return ""
+    try:
+        ts = pd.Timestamp(match_datetime)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return ""
+
+
+def _resolve_names_and_label(venue: str, home_name: str, away_name: str) -> tuple[str, str, str, str]:
+    if venue == "home":
+        return home_name, away_name, f"vs {away_name}", f"{home_name} vs {away_name}"
+    return away_name, home_name, f"@ {home_name}", f"{home_name} vs {away_name}"
+
+
 def _build_recent_matches(df: pd.DataFrame, league_id: str | None = None) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         result_value = float(row.get("one_x_two_result", 0.5))
         if result_value == 1.0:
             result = "W"
@@ -2292,30 +2326,7 @@ def _build_recent_matches(df: pd.DataFrame, league_id: str | None = None) -> lis
         away_momentum = float(row.get("away_momentum", 0.0))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
         rows.append(
             {
@@ -2326,7 +2337,7 @@ def _build_recent_matches(df: pd.DataFrame, league_id: str | None = None) -> lis
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "result": result,
                 "team_momentum": home_momentum if venue == "home" else away_momentum,
                 "opponent_momentum": away_momentum if venue == "home" else home_momentum,
@@ -2346,42 +2357,17 @@ def _build_recent_matches_over_under(
     line: float,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         venue = str(row.get("venue", ""))
         total_goals = float(row.get("total_goals", 0.0))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
-
-        over_under_result = "O" if total_goals > line else "U"
         rows.append(
             {
                 "match_id": match_id,
@@ -2391,9 +2377,9 @@ def _build_recent_matches_over_under(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "total_goals": total_goals,
-                "over_under_result": over_under_result,
+                "over_under_result": "O" if total_goals > line else "U",
                 **_build_overlay_metrics_from_row(
                     row,
                     venue=venue,
@@ -2412,42 +2398,17 @@ def _build_recent_matches_team_goals_over_under(
     goals_column: str = "goals_scored",
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         venue = str(row.get("venue", ""))
         team_goals = float(row.get(goals_column, 0.0))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
-
-        over_under_result = "O" if team_goals > line else "U"
         rows.append(
             {
                 "match_id": match_id,
@@ -2457,9 +2418,9 @@ def _build_recent_matches_team_goals_over_under(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "team_goals": team_goals,
-                "over_under_result": over_under_result,
+                "over_under_result": "O" if team_goals > line else "U",
                 **_build_overlay_metrics_from_row(
                     row,
                     venue=venue,
@@ -2477,42 +2438,17 @@ def _build_recent_matches_corners(
     line: float = 8.5,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
         total_corners = _resolve_total_corners_from_row(row)
 
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
-
-        corners_over_under_result = "O" if total_corners > line else "U"
         rows.append(
             {
                 "match_id": match_id,
@@ -2522,9 +2458,9 @@ def _build_recent_matches_corners(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "total_corners": total_corners,
-                "corners_over_under_result": corners_over_under_result,
+                "corners_over_under_result": "O" if total_corners > line else "U",
                 **_build_overlay_metrics_from_row(
                     row,
                     venue=venue,
@@ -2541,12 +2477,11 @@ def _build_recent_matches_double_chance(
     df: pd.DataFrame,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         goals_scored = float(row.get("goals_scored", 0.0))
         opponent_goals = float(row.get("opponent_goals", 0.0))
         if goals_scored > opponent_goals:
@@ -2559,30 +2494,7 @@ def _build_recent_matches_double_chance(
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
         is_hit = result in {"W", "D"}
         rows.append(
@@ -2594,7 +2506,7 @@ def _build_recent_matches_double_chance(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "result": result,
                 "double_chance_result": "H" if is_hit else "M",
                 "double_chance_value": 1.0 if is_hit else 0.1,
@@ -2614,12 +2526,11 @@ def _build_recent_matches_btts(
     df: pd.DataFrame,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         goals_scored = float(row.get("goals_scored", 0.0))
         opponent_goals = float(row.get("opponent_goals", 0.0))
         is_btts = goals_scored > 0 and opponent_goals > 0
@@ -2627,30 +2538,7 @@ def _build_recent_matches_btts(
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
         rows.append(
             {
@@ -2661,7 +2549,7 @@ def _build_recent_matches_btts(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "goals_scored": goals_scored,
                 "opponent_goals": opponent_goals,
                 "btts_result": "Y" if is_btts else "N",
@@ -2681,12 +2569,11 @@ def _build_recent_matches_weh(
     df: pd.DataFrame,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         th1 = float(row.get("team_h1_goals", 0))
         oh1 = float(row.get("opponent_h1_goals", 0))
         th2 = float(row.get("team_h2_goals", 0))
@@ -2696,30 +2583,7 @@ def _build_recent_matches_weh(
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
         rows.append(
             {
@@ -2730,7 +2594,7 @@ def _build_recent_matches_weh(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "team_h1_goals": th1,
                 "opponent_h1_goals": oh1,
                 "team_h2_goals": th2,
@@ -2752,12 +2616,11 @@ def _build_recent_matches_wbh(
     df: pd.DataFrame,
     league_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    recent_df = df.copy()
     rows: list[dict[str, Any]] = []
     match_lookup = _match_name_index()
     match_datetime_lookup = _match_datetime_index()
 
-    for _, row in recent_df.iterrows():
+    for row in df.to_dict("records"):
         th1 = float(row.get("team_h1_goals", 0))
         oh1 = float(row.get("opponent_h1_goals", 0))
         th2 = float(row.get("team_h2_goals", 0))
@@ -2767,30 +2630,7 @@ def _build_recent_matches_wbh(
         venue = str(row.get("venue", ""))
         match_id = int(row.get("match_id", 0))
         home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
-
-        if venue == "home":
-            team_name = home_name
-            opponent_name = away_name
-            chart_label = f"vs {opponent_name}"
-            fixture_display = f"{team_name} vs {opponent_name}"
-        else:
-            team_name = away_name
-            opponent_name = home_name
-            chart_label = f"@ {opponent_name}"
-            fixture_display = f"{opponent_name} vs {team_name}"
-
-        match_datetime = match_datetime_lookup.get(match_id)
-        match_date = ""
-        if match_datetime is not None:
-            try:
-                ts = pd.Timestamp(match_datetime)
-                if ts.tzinfo is None:
-                    ts = ts.tz_localize("UTC")
-                else:
-                    ts = ts.tz_convert("UTC")
-                match_date = ts.isoformat().replace("+00:00", "Z")
-            except Exception:
-                match_date = ""
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
 
         rows.append(
             {
@@ -2801,7 +2641,7 @@ def _build_recent_matches_wbh(
                 "opponent_name": opponent_name,
                 "chart_label": chart_label,
                 "fixture_display": fixture_display,
-                "match_date": match_date,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
                 "team_h1_goals": th1,
                 "opponent_h1_goals": oh1,
                 "team_h2_goals": th2,
@@ -4666,6 +4506,13 @@ def create_app() -> Flask:
 
 
 app = create_app()
+
+# Pre-warm expensive caches so the first request doesn't pay the cold-start cost.
+try:
+    _load_raw_df()
+    _build_store()
+except Exception:
+    pass  # Non-fatal — will retry on first request
 
 
 if __name__ == "__main__":

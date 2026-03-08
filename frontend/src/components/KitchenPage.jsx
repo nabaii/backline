@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
 import { getLeagues, getFixturesForLeague } from '../api/backendApi'
 import { getTeamLogo } from '../utils/premierLeagueLogos'
 import LeagueSelector from './LeagueSelector'
 import FixtureList from './FixtureList'
-import BetTypeWorkspace from './BetTypeWorkspace'
 import WorkspaceLoadingPlaceholder from './WorkspaceLoadingPlaceholder'
-import ChatWindow from './ChatWindow'
+
+const BetTypeWorkspace = lazy(() => import('./BetTypeWorkspace'))
+const ChatWindow = lazy(() => import('./ChatWindow'))
 
 function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
   const menuRef = useRef(null)
@@ -193,27 +194,29 @@ export default function KitchenPage() {
         </aside>
 
         <main className="workspace-pane">
-          {activeTab === 'main' ? (
-            <ChatWindow selectedFixture={selectedFixture} onNavigateToKitchen={handleNavigateToKitchen} />
-          ) : error ? (
-            <div className="workspace-error">
-              <strong>Could not load match workspace.</strong>
-              <div>{error}</div>
-              <div>Ensure the backend is running with: <code>python backend_api.py</code></div>
-            </div>
-          ) : selectedMatch ? (
-            <BetTypeWorkspace
-              matchId={selectedMatch}
-              homeTeamId={selectedFixture?.home_team_id}
-              awayTeamId={selectedFixture?.away_team_id}
-              homeTeamName={selectedFixture?.home_team_name}
-              awayTeamName={selectedFixture?.away_team_name}
-              leagueId={selectedLeague}
-              initialBetType={initialBetType}
-            />
-          ) : isLeagueLoading ? (
-            <WorkspaceLoadingPlaceholder />
-          ) : <div className="workspace-error">No match selected.</div>}
+          <Suspense fallback={<WorkspaceLoadingPlaceholder />}>
+            {activeTab === 'main' ? (
+              <ChatWindow selectedFixture={selectedFixture} onNavigateToKitchen={handleNavigateToKitchen} />
+            ) : error ? (
+              <div className="workspace-error">
+                <strong>Could not load match workspace.</strong>
+                <div>{error}</div>
+                <div>Ensure the backend is running with: <code>python backend_api.py</code></div>
+              </div>
+            ) : selectedMatch ? (
+              <BetTypeWorkspace
+                matchId={selectedMatch}
+                homeTeamId={selectedFixture?.home_team_id}
+                awayTeamId={selectedFixture?.away_team_id}
+                homeTeamName={selectedFixture?.home_team_name}
+                awayTeamName={selectedFixture?.away_team_name}
+                leagueId={selectedLeague}
+                initialBetType={initialBetType}
+              />
+            ) : isLeagueLoading ? (
+              <WorkspaceLoadingPlaceholder />
+            ) : <div className="workspace-error">No match selected.</div>}
+          </Suspense>
         </main>
       </div>
 

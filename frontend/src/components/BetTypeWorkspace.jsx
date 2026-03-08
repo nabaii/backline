@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import api from '../api/backendApi'
 import FilterDropdown from './FilterDropdown'
@@ -310,7 +310,10 @@ export default function BetTypeWorkspace({
   const [error, setError] = useState(null)
   const workspaceCacheRef = useRef(new Map())
   const seasonMatchesRef = useRef({})
-  const hasPendingFilterChanges = JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters)
+  const hasPendingFilterChanges = useMemo(
+    () => JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters),
+    [draftFilters, appliedFilters]
+  )
 
   // Sync betType when navigating from chat mini chart
   useEffect(() => {
