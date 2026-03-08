@@ -561,7 +561,13 @@ def _refresh_shot_payloads_for_existing_rows(df: pd.DataFrame, ss, force: bool =
 
 def _flatten_match_stats_row(match_info, match_stats, match_shots=None):
     row_dict = {}
-    for _, row in match_stats.iterrows():
+    # Only use full-match ("ALL") period stats; half-time rows would overwrite them.
+    full_match_stats = (
+        match_stats[match_stats["period"] == "ALL"]
+        if "period" in match_stats.columns and not match_stats.empty
+        else match_stats
+    )
+    for _, row in full_match_stats.iterrows():
         feature = _normalize_stat_name(row.get("name", ""))
         if not feature:
             continue

@@ -727,6 +727,7 @@ function TeamBarChart({
   overlayConfig,
   isFiltersOpen,
   onToggleFilters,
+  seasonAvgOverride,
 }) {
   const containerRef = useRef(null)
   const chartCanvasRef = useRef(null)
@@ -784,7 +785,7 @@ function TeamBarChart({
   const hitRate = computeHitRate(data, normalizedBetType)
   const hitRateToneClass = getHitRateToneClass(hitRate.percent)
   const graphAvg = computeGraphAvg(data, normalizedBetType)
-  const seasonAvg = computeSeasonAvg(data, normalizedBetType)
+  const seasonAvg = seasonAvgOverride != null ? seasonAvgOverride : computeSeasonAvg(data, normalizedBetType)
   const averageMetricLabel = getAverageMetricLabel(normalizedBetType)
   const lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
   const hasLineSummaryLabel = Boolean(lineSummaryLabel)
@@ -1126,6 +1127,7 @@ function TeamBarChart({
 
 export default function ChartArea({
   recentMatches,
+  allSeasonMatches,
   betType = '1X2',
   overUnderLine = 2.5,
   onOverUnderLineDraftChange,
@@ -1233,6 +1235,35 @@ export default function ChartArea({
     return enrichWithOverlay(bars, overlayConfig)
   }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfig])
 
+  // Compute season averages from unfiltered data (constant across filter changes)
+  const homeSeasonAvg = useMemo(() => {
+    const source = allSeasonMatches || recentMatches
+    if (!source?.home?.length) return null
+    let bars
+    if (isCorners) bars = buildCornerBars(source.home, line)
+    else if (isOverUnder) bars = buildOverUnderBars(source.home, line, normalizedBetType)
+    else if (isBtts) bars = buildBttsBars(source.home)
+    else if (isWeh) bars = buildWehBars(source.home)
+    else if (isWbh) bars = buildWbhBars(source.home)
+    else if (isDoubleChance) bars = buildDoubleChanceBars(source.home)
+    else bars = buildOneXTwoBars(source.home)
+    return computeSeasonAvg(bars, normalizedBetType)
+  }, [allSeasonMatches, recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
+
+  const awaySeasonAvg = useMemo(() => {
+    const source = allSeasonMatches || recentMatches
+    if (!source?.away?.length) return null
+    let bars
+    if (isCorners) bars = buildCornerBars(source.away, line)
+    else if (isOverUnder) bars = buildOverUnderBars(source.away, line, normalizedBetType)
+    else if (isBtts) bars = buildBttsBars(source.away)
+    else if (isWeh) bars = buildWehBars(source.away)
+    else if (isWbh) bars = buildWbhBars(source.away)
+    else if (isDoubleChance) bars = buildDoubleChanceBars(source.away)
+    else bars = buildOneXTwoBars(source.away)
+    return computeSeasonAvg(bars, normalizedBetType)
+  }, [allSeasonMatches, recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
+
   return (
     <div className="chart-area">
 
@@ -1251,6 +1282,7 @@ export default function ChartArea({
             overlayConfig={overlayConfig}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}
+            seasonAvgOverride={homeSeasonAvg}
           />
         ) : null}
         {activeTeamView !== VIEW_HOME ? (
@@ -1267,6 +1299,7 @@ export default function ChartArea({
             overlayConfig={overlayConfig}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}
+            seasonAvgOverride={awaySeasonAvg}
           />
         ) : null}
       </div>

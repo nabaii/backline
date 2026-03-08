@@ -4422,7 +4422,53 @@ def create_app() -> Flask:
         }
         return jsonify(response)
 
-    # ── RAG query endpoint ──────────────────────────────────────────────────────
+    # ── Chat endpoint (intent → workspace → explain) ────────────────────────
+    _chat_orchestrator: Any = None
+
+    @app.route("/api/chat/stream", methods=["POST", "OPTIONS"])
+    def chat_stream():
+        """
+        Natural-language chat that queries the kitchen workspaces internally.
+        Streams the LLM explanation as plain text chunks.
+        """
+        nonlocal _chat_orchestrator
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.chat_orchestrator import ChatOrchestrator, ChatRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        if _chat_orchestrator is None:
+            _chat_orchestrator = ChatOrchestrator()
+
+        chat_request = ChatRequest(
+            query=query_text,
+            home_team_id=_safe_int(body.get("home_team_id"), None),
+            away_team_id=_safe_int(body.get("away_team_id"), None),
+            home_team_name=body.get("home_team_name", ""),
+            away_team_name=body.get("away_team_name", ""),
+            league_id=body.get("league_id", ""),
+        )
+
+        def generate():
+            try:
+                for chunk in _chat_orchestrator.stream(chat_request):
+                    yield chunk
+            except Exception as exc:
+                yield f"\n\n[Error: {exc}]"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/plain",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    # ── RAG query endpoint (legacy) ───────────────────────────────────────────
     _rag_pipeline: Any = None  # lazy-init on first request
 
     @app.route("/api/rag/ingest", methods=["POST"])

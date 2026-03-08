@@ -293,8 +293,9 @@ export default function BetTypeWorkspace({
   homeTeamName,
   awayTeamName,
   leagueId,
+  initialBetType,
 }) {
-  const [betType, setBetType] = useState(BET_TYPE_ONE_X_TWO)
+  const [betType, setBetType] = useState(initialBetType || BET_TYPE_ONE_X_TWO)
   const [workspace, setWorkspace] = useState(null)
   const [draftFilters, setDraftFilters] = useState(createDefaultFilters)
   const [appliedFilters, setAppliedFilters] = useState(createDefaultFilters)
@@ -308,7 +309,13 @@ export default function BetTypeWorkspace({
   const [activeOverlayFilter, setActiveOverlayFilter] = useState(null)
   const [error, setError] = useState(null)
   const workspaceCacheRef = useRef(new Map())
+  const seasonMatchesRef = useRef({})
   const hasPendingFilterChanges = JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters)
+
+  // Sync betType when navigating from chat mini chart
+  useEffect(() => {
+    if (initialBetType) setBetType(initialBetType)
+  }, [initialBetType])
 
   const applyFilters = () => {
     if (!hasPendingFilterChanges) return
@@ -406,6 +413,10 @@ export default function BetTypeWorkspace({
       .then(r => {
         workspaceCacheRef.current.set(cacheKey, r)
         setWorkspace(r)
+        // Cache season matches from first (unfiltered) load per bet type
+        if (!seasonMatchesRef.current[betType] && r.recent_matches) {
+          seasonMatchesRef.current[betType] = r.recent_matches
+        }
       })
       .catch(err => {
         setWorkspace(null)
@@ -430,6 +441,7 @@ export default function BetTypeWorkspace({
     setDraftFilters(defaults)
     setAppliedFilters(defaults)
     setChartTeamView(defaultTeamViewForBetType(betType))
+    seasonMatchesRef.current = {}
   }, [matchId])
 
   if (error) {
@@ -464,6 +476,7 @@ export default function BetTypeWorkspace({
           <div className="workspace-chart-stack">
             <ChartArea
               recentMatches={workspace.recent_matches}
+              allSeasonMatches={seasonMatchesRef.current[betType] || null}
               betType={workspace?.workspace?.bet_type || betType}
               overUnderLine={draftOverUnderLine}
               onOverUnderLineDraftChange={updateOverUnderLineDraft}

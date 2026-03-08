@@ -312,6 +312,33 @@ export async function ragStream({ query, home_team_id, away_team_id, extra_conte
   }
 }
 
+/**
+ * Stream a chat response that queries workspaces internally.
+ * @param {object} params - { query, home_team_id, away_team_id, home_team_name, away_team_name, league_id }
+ * @param {function} onChunk - called with each text chunk as it arrives
+ * @returns {Promise<void>} resolves when the stream is complete
+ */
+export async function chatStream({ query, home_team_id, away_team_id, home_team_name = '', away_team_name = '', league_id = '' }, onChunk) {
+  const response = await fetch(`${API_BASE}/api/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, home_team_id, away_team_id, home_team_name, away_team_name, league_id }),
+  })
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    throw new Error(payload.error || `Request failed (${response.status})`)
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    onChunk(decoder.decode(value, { stream: true }))
+  }
+}
+
 export default {
   getLeagues,
   getFixturesForLeague,
@@ -326,4 +353,5 @@ export default {
   getWorkspaceAwayOu,
   getWorkspaceCorners,
   ragStream,
+  chatStream,
 }

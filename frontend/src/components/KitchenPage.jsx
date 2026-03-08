@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { getLeagues, getFixturesForLeague } from '../api/backendApi'
 import { getTeamLogo } from '../utils/premierLeagueLogos'
 import LeagueSelector from './LeagueSelector'
@@ -58,10 +58,29 @@ export default function KitchenPage() {
   const [selectedMatch, setSelectedMatch] = useState(null)
   const [error, setError] = useState(null)
   const [isLeagueLoading, setIsLeagueLoading] = useState(false)
+  const [initialBetType, setInitialBetType] = useState(null)
   const fixturesCacheRef = useRef(new Map())
   const selectedMatchByLeagueRef = useRef(new Map())
   const fixturesDateRef = useRef(new Date().toISOString().slice(0, 10))
   const selectedFixture = fixtures.find(f => f.match_id === selectedMatch) || null
+
+  const handleNavigateToKitchen = useCallback((chatBetType) => {
+    // Map chat bet_type values to BetTypeWorkspace constants
+    const BET_TYPE_MAP = {
+      'over_under': 'over_under',
+      'corners': 'corners',
+      'one_x_two': '1X2',
+      '1X2': '1X2',
+      'double_chance': 'double_chance',
+      'btts': 'btts',
+      'home_ou': 'home_ou',
+      'away_ou': 'away_ou',
+      'win_either_half': 'win_either_half',
+      'win_both_halves': 'win_both_halves',
+    }
+    setInitialBetType(BET_TYPE_MAP[chatBetType] || '1X2')
+    setActiveTab('kitchen')
+  }, [])
 
   const pickSelectedMatch = (leagueId, leagueFixtures) => {
     if (!leagueFixtures.length) return null
@@ -175,7 +194,7 @@ export default function KitchenPage() {
 
         <main className="workspace-pane">
           {activeTab === 'main' ? (
-            <ChatWindow selectedFixture={selectedFixture} />
+            <ChatWindow selectedFixture={selectedFixture} onNavigateToKitchen={handleNavigateToKitchen} />
           ) : error ? (
             <div className="workspace-error">
               <strong>Could not load match workspace.</strong>
@@ -190,6 +209,7 @@ export default function KitchenPage() {
               homeTeamName={selectedFixture?.home_team_name}
               awayTeamName={selectedFixture?.away_team_name}
               leagueId={selectedLeague}
+              initialBetType={initialBetType}
             />
           ) : isLeagueLoading ? (
             <WorkspaceLoadingPlaceholder />
