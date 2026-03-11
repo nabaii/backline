@@ -152,7 +152,20 @@ def build_hit_rates_for_team(
         bet_type=intent.bet_type,
         perspective="all",  # Start with all to get full season
         filters={},
-        required_features=["team_h1_goals", "opponent_h1_goals"], # broad enough
+        required_features=[
+            "total_goals",
+            "goals_scored",
+            "opponent_goals",
+            "team_h1_goals",
+            "opponent_h1_goals",
+            "team_h2_goals",
+            "opponent_h2_goals",
+            "total_corners",
+            "home_corners",
+            "away_corners",
+            "one_x_two_result",
+            "double_chance_outcome",
+        ],
         home_team_id=team_id if perspective == "home" else -1,
         away_team_id=team_id if perspective == "away" else -1,
     )

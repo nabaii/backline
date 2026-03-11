@@ -293,7 +293,7 @@ function buildOverUnderBars(matches = [], line = 2.5, betType = BET_TYPE_OVER_UN
         plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
         barColor = '#2ecc71'
       } else {
-        plottedGoals = 0
+        plottedGoals = 0.1
         barColor = '#e74c3c'
       }
       // ── Standard O/U: colour based on goals vs line only ──

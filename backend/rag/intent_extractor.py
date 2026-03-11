@@ -29,6 +29,8 @@ null for others)
 For btts — "yes" or "no". null otherwise.
 - primary_team_hint: which team the user seems focused on (string, or null if \
 both/neither)
+- opponent_group: qualitative grouping of opponents (e.g. "top 6", "relegation \
+teams", "bad PL teams"). null if not specified.
 
 Be intuitive with implicit intents:
 - "how does X play" / general form → over_under (2.5)
@@ -37,7 +39,7 @@ Be intuitive with implicit intents:
 - "corners" / "set pieces" → corners
 
 Return ONLY valid JSON array, no markdown:
-[{"bet_type": "...", "line": ..., "outcome_type": ..., "primary_team_hint": ...}]
+[{"bet_type": "...", "line": ..., "outcome_type": ..., "primary_team_hint": ..., "opponent_group": ...}]
 
 If no football intent can be extracted, return: []"""
 
@@ -49,6 +51,7 @@ class ParsedIntent:
     line: float | None
     outcome_type: str | None
     primary_team_hint: str | None = None
+    opponent_group: str | None = None
 
 
 def extract_intents(
@@ -103,10 +106,11 @@ def extract_intents(
             line=item.get("line"),
             outcome_type=item.get("outcome_type"),
             primary_team_hint=item.get("primary_team_hint"),
+            opponent_group=item.get("opponent_group"),
         ))
 
     # Fallback: if nothing extracted, default to over_under
     if not intents:
-        intents = [ParsedIntent(bet_type="over_under", line=2.5, outcome_type=None)]
+        intents = [ParsedIntent(bet_type="over_under", line=2.5, outcome_type=None, opponent_group=None)]
 
     return intents
