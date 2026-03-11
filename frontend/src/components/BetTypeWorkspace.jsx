@@ -19,6 +19,11 @@ const BET_TYPE_ONE_X_TWO = '1X2'
 const BET_TYPE_OVER_UNDER = 'over_under'
 const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
 const BET_TYPE_BTTS = 'btts'
+const BET_TYPE_ONE_X_TWO_OU = '1x2_ou'
+const BET_TYPE_DOUBLE_CHANCE_OU = 'double_chance_ou'
+const BET_TYPE_BTTS_OU = 'btts_ou'
+const BET_TYPE_FIRST_HALF_OU = 'first_half_ou'
+const BET_TYPE_FIRST_HALF_1X2 = 'first_half_1x2'
 const BET_TYPE_HOME_OU = 'home_ou'
 const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_CORNERS = 'corners'
@@ -394,6 +399,21 @@ export default function BetTypeWorkspace({
       if (betType === BET_TYPE_BTTS) {
         return api.getWorkspaceBtts(requestPayload)
       }
+      if (betType === BET_TYPE_ONE_X_TWO_OU) {
+        return api.getWorkspace1X2Ou({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_DOUBLE_CHANCE_OU) {
+        return api.getWorkspaceDoubleChanceOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_BTTS_OU) {
+        return api.getWorkspaceBttsOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_FIRST_HALF_OU) {
+        return api.getWorkspaceFirstHalfOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_FIRST_HALF_1X2) {
+        return api.getWorkspaceFirstHalf1X2(requestPayload)
+      }
       if (betType === BET_TYPE_WIN_EITHER_HALF) {
         return api.getWorkspaceWinEitherHalf(requestPayload)
       }
@@ -466,6 +486,11 @@ export default function BetTypeWorkspace({
           <button className={betType === BET_TYPE_DOUBLE_CHANCE ? 'active' : ''} onClick={() => setBetType(BET_TYPE_DOUBLE_CHANCE)}>Double Chance</button>
           <button className={betType === BET_TYPE_BTTS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_BTTS)}>BTTS</button>
           <button className={betType === BET_TYPE_OVER_UNDER ? 'active' : ''} onClick={() => setBetType(BET_TYPE_OVER_UNDER)}>Over/Under</button>
+          <button className={betType === BET_TYPE_ONE_X_TWO_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_ONE_X_TWO_OU)}>1X2 + O/U</button>
+          <button className={betType === BET_TYPE_DOUBLE_CHANCE_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_DOUBLE_CHANCE_OU)}>Double Chance + O/U</button>
+          <button className={betType === BET_TYPE_BTTS_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_BTTS_OU)}>BTTS + O/U</button>
+          <button className={betType === BET_TYPE_FIRST_HALF_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_FIRST_HALF_OU)}>1st Half O/U</button>
+          <button className={betType === BET_TYPE_FIRST_HALF_1X2 ? 'active' : ''} onClick={() => setBetType(BET_TYPE_FIRST_HALF_1X2)}>1X2 1st Half</button>
           <button className={betType === BET_TYPE_HOME_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_HOME_OU)}>Home O/U</button>
           <button className={betType === BET_TYPE_AWAY_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_AWAY_OU)}>Away O/U</button>
           <button className={betType === BET_TYPE_CORNERS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_CORNERS)}>Corners</button>
@@ -491,6 +516,7 @@ export default function BetTypeWorkspace({
               isFiltersOpen={isFiltersOpen}
               onToggleFilters={() => setIsFiltersOpen(current => !current)}
               activeOverlayFilter={activeOverlayFilter}
+              opponentRanks={workspace?.opponent_ranks || null}
             />
             <div className="metrics-panel-desktop-wrap">
               <MetricsPanel

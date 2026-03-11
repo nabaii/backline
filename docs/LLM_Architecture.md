@@ -1,257 +1,128 @@
-Designing the chat LLM for Backline is really about routing the user’s question to the right analysis module, retrieving the relevant stats, and then letting the LLM explain the findings clearly.
+# Backline LLM Architecture: RAG & Analytic Modules
 
-Think of the LLM as the interpreter, not the analyst.
+This document details the complete flow of the Chat LLM orchestration.
+It explains how natural-language queries are translated into structured analytic evidence, enriched with team profiles, layers of hit rates, and returned to the user.
 
-Your modules do the analysis, the LLM explains it.
+---
 
-Core Architecture for Your Chat LLM
+## The Philosophy
 
-The structure should look like this:
+The LLM is **not** an analyst; it is an *interpreter* and an *explainer*.
 
-User Question
-     ↓
-Intent Classifier
-     ↓
-Module Router
-     ↓
-Analytics Engine (your 5 modules)
-     ↓
-LLM Explanation Layer
-     ↓
-User Response
+**Core Principles:**
+1. **Never guess the data.** If the LLM computes numbers itself, it will hallucinate.
+2. **Deterministic Retrieval.** All real analysis happens in strongly-typed Python modules querying PostgreSQL. The LLM only receives the final sliced data.
+3. **Conciseness over Completeness.** The LLM should extract the 2–3 most critical insights rather than simply echoing the whole JSON payload back to the user.
 
-The key is that the LLM never decides the bet.
-It summarizes evidence from the modules.
+---
 
-Step 1 — Intent Detection
+## Pipeline Overview
 
-You first determine which module should handle the question.
+The conversational architectue uses a single endpoint (`/api/chat/stream`) which triggers the `ChatOrchestrator`.
 
-Example intents:
+The orchestration happens in 5 distinct steps:
 
-User Question	Intent	Module
-Is over 2.5 good here?	GOAL_TOTAL	Goal Total Analyzer
-Will both teams score?	BTTS	BTTS Analyzer
-Can Arsenal win this?	MATCH_WINNER	Match Winner Analyzer
-Is this bet safe?	RISK	Risk Analyzer
-Over 2.5 or BTTS?	COMPARISON	Market Comparison
+### Step 1: Query Classification
 
-Example prompt:
+A fast, lightweight call (GPT-4o-mini) classifies the user's intent using their `history`.
 
-Classify the user's betting question into one of these categories:
+**Types:**
+- **`greeting`**: Friendly, non-betting banter ("Hi", "Thanks"). Gets a static friendly response.
+- **`vague`**: Broad query ("What should I bet on?"). Gets a prompt suggesting specific markets to explore.
+- **`conversational`**: A direct answer to a previous follow-up ("Yes", "Check over 2.5 instead"). The classifier generates a *resolved query* combining context with the answer (e.g. "Check Arsenal over 2.5").
+- **`betting_intent`**: A specific request ("Can Chelsea win and is BTTS good?").
 
-GOAL_TOTAL
-BTTS
-MATCH_WINNER
-RISK
-COMPARISON
+### Step 2: Multi-Intent Extraction
 
-Return only the category.
+For betting queries, another lightweight extraction isolates **all** requested markets into structured intents (`ParsedIntent`).
 
+An intent contains:
+- `bet_type`: one of `over_under`, `one_x_two`, `double_chance`, `corners`, `btts`, `first_half_ou`, etc.
+- `line`: The numerical threshold (e.g., `2.5`, `8.5`)
+- `outcome_type`: For 3-way markets (`1`, `X`, `2`)
+- `primary_team_hint`: The team the user focused on.
 
-Step 2 — Module Execution (Implemented)
+Example: *"Who wins Arsenal vs City and what about over 2.5?"*
+Extracts: `[{bet_type: "one_x_two"}, {bet_type: "over_under", line: 2.5}]`
 
-The chat orchestrator (backend/rag/chat_orchestrator.py) calls the kitchen
-workspaces directly — the same code that powers the manual kitchen UI.
+### Step 3: Team Profiling (xGD)
 
-Example:
+Before fetching hit rates, the `TeamProfiler` accesses the DB to calculate the inherent strength and form of both the home and away teams.
 
-User asks: "Is over 2.5 good for Chelsea vs Villa?"
+**Profile includes:**
+- **`xgd_season_rank`**: The team's expected goal difference position across the full league table.
+- **`xgd_last_5`**: Rolling form calculated as the average xGD in their last five matches.
 
-1. Intent parser returns: {"bet_type": "over_under", "line": 2.5}
-2. Orchestrator calls OverUnderWorkspace.get_evidence() for both teams
-3. Computes hit rates (over/under counts) from real match data
-4. Feeds structured metrics to the LLM explanation layer
+This provides the context necessary to evaluate if a high hit rate is legitimate or inflated by an easy schedule.
 
-Supported workspaces:
-- over_under → OverUnderWorkspace (line defaults to 2.5)
-- one_x_two → OneXTwoWorkspace (outcome: win/draw/loss)
-- double_chance → DoubleChanceWorkspace
-- corners → CornerWorkspace (line defaults to 8.5)
+### Step 4: Layered Hit Rates
 
-Step 3 — Structured Output from Modules
+The `HitRateBuilder` takes each extracted intent and routes it through the internal Workspaces to generate actual statistical evidence.
 
-Each module returns structured data, not text.
+For the active team, hit rates are constructed across four increasingly specific layers:
 
-Example:
+| Layer | Description |
+|---|---|
+| 1. **Season** | Performance across all matches this season. |
+| 2. **Perspective** | Performance narrowed down to home or away matches only. |
+| 3. **Rank-filtered** | Performance against opponents mathematically similar to the upcoming opponent (±3 positions in xRank). |
+| 4. **Combined** | Perspective + Rank-Filtered. The ultimate contextual metric. |
 
-{
-  "market": "over_2_5",
-  "hit_rate_last_10": 0.70,
-  "league_average": 0.52,
-  ...
-}
+### Step 5: LLM Explanation
 
-Step 4 — LLM Explanation Layer
+The original query, team profiles, and layered hit rates across all extracted intents are combined into a dense JSON payload and passed to the primary explaining model (`gpt-4o`).
 
-Now the LLM translates the analytics into human language.
+The LLM uses strict instructions:
+- Keep the response to 3-5 sentences.
+- Lead with the strongest finding. Synthesize multiple intents gracefully.
+- Include a specific, actionable follow-up question ("Want to see how this looks just for home matches?").
 
-Prompt example:
+---
 
-You are a betting research assistant.
+## Data Structures
 
-Explain the statistics clearly.
+### `ChatRequest`
 
-Do not recommend bets.
-Do not say "best bet".
-Focus on trends and probabilities.
+Passed by the frontend. Contains the active fixture context and the conversation history.
 
-DATA:
-{retrieved_stats}
+```python
+@dataclass
+class ChatRequest:
+    query: str
+    history: list[dict[str, str]]
+    home_team_id: int | None
+    away_team_id: int | None
+    home_team_name: str
+    away_team_name: str
+    league_id: str
+    model: str
+```
 
-USER QUESTION:
-{user_question}
-
-Example output:
-
-Over 2.5 goals has landed in 7 of the last 10 matches involving these teams, which is higher than the league average of 52%.
-
-Both sides also rank high in attacking output, with strong expected goal numbers. The main factor supporting higher goal totals is the fast tempo and shot volume these teams generate.
-
-Notice:
-
-No prediction
-No recommendation
-Just analysis.
-
-Step 5 — Special Handling for “Best Bet”
-
-If the classifier detects:
-
-BEST_BET
-
-Return your philosophy response:
-
-Backline doesn’t select bets.
-You steer the bet, and I’ll help analyze the data behind it.
-
-Tell me the market you’re considering.
-
-Step 6 — Comparison Module
-
-If the user asks:
-
-Over 2.5 or BTTS?
-
-You call two analyzers.
-
-Example:
-
-Goal Total Analyzer
-BTTS Analyzer
-
-Then feed both outputs into the LLM.
-
-Prompt:
-
-Compare these two betting markets based on the data.
-Explain the differences in likelihood and risk.
-Do not recommend a bet.
-Step 7 — Conversation Memory
-
-The assistant should remember what market the user is discussing.
-
-Example flow:
-
-User:
-
-Over 2.5 for Chelsea vs Villa?
-
-Assistant analyzes.
-
-User:
-
-What about BTTS?
-
-Your system already knows the match.
-
-So only the market changes.
-
-Step 8 — Ideal Prompt Personality
-
-Your system prompt should reinforce Backline philosophy.
-
-Example:
-
-You are Backline, a betting research assistant.
-
-Your role is to analyze football betting markets using statistical evidence.
-
-You DO NOT:
-- give predictions
-- choose bets
-- say "best bet"
-
-You DO:
-- explain trends
-- highlight risk
-- provide context
-- help users evaluate their own bets
-The Most Important Design Principle
-
-Do not let the LLM access the entire dataset.
-
-Only give it:
-
-Small structured analytics outputs
-
-Example:
-
-Bad:
-
-Send 500 match records
-
-Good:
-
-Send 10 computed metrics
-
-This keeps:
-
-latency low
-
-cost low
-
-hallucinations low
-
-Response Style Guidelines
-
-Every response from Backline must follow these rules:
-
-1. Keep it short and digestible.
-   - 2–4 sentences is the ideal length. Never exceed a short paragraph.
-   - Lead with the key insight, not a preamble.
-
-2. Teach the user something.
-   - Every response should leave the user understanding the data better.
-   - Explain *why* the numbers matter, not just what they are.
-   - Example: "Chelsea's last 8 home matches averaged 3.1 total goals — driven mainly by their high shot volume (17 per game) rather than clinical finishing."
-
-3. No stat dumps.
-   - Do not list every metric from the context. Pick the 2–3 most relevant numbers and weave them into a clear sentence.
-
-4. Use plain language.
-   - Avoid jargon unless the user introduced it first.
-   - Write like you're explaining to a smart friend, not writing an academic paper.
-
-5. Reference the data, not opinions.
-   - Always tie claims back to specific stats from the retrieved matches.
-   - Never speculate beyond what the data supports.
-
-6. No filler.
-   - No greetings, no "Great question!", no "Let me break this down for you."
-   - Start directly with the analysis.
-
-What This Becomes
-
-Your LLM becomes something like:
-
-Betting Copilot
-
-Not:
-
-Betting Predictor
-
-Exactly matching your philosophy:
-
-You steer the boat.
-Backline shows the waters.
+### `QueryClassification`
+```python
+@dataclass
+class QueryClassification:
+    query_type: Literal["greeting", "vague", "betting_intent", "conversational"]
+    resolved_query: str | None
+```
+
+### `HitRateProfile`
+```python
+@dataclass
+class HitRateProfile:
+    team_name: str
+    intent: ParsedIntent
+    season_hits: int
+    season_misses: int
+    season_rate: float
+    perspective: str
+    perspective_hits: int
+    perspective_misses: int
+    perspective_rate: float
+    rank_filtered_hits: int
+    rank_filtered_misses: int
+    rank_filtered_rate: float
+    combined_hits: int
+    combined_misses: int
+    combined_rate: float
+```

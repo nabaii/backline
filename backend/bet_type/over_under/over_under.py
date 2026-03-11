@@ -155,7 +155,7 @@ class OverUnderWorkspace(BetTypeWorkspace):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["total_goals", "penalty_goals_home", "penalty_goals_away", "total_penalty_goals"],
+            required_features=["total_goals", "penalty_goals_home", "penalty_goals_away", "total_penalty_goals", "goals_scored", "opponent_goals"],
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )

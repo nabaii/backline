@@ -14,6 +14,11 @@ const BET_TYPE_HOME_OU = 'home_ou'
 const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
 const BET_TYPE_BTTS = 'btts'
+const BET_TYPE_ONE_X_TWO_OU = '1x2_ou'
+const BET_TYPE_DOUBLE_CHANCE_OU = 'double_chance_ou'
+const BET_TYPE_BTTS_OU = 'btts_ou'
+const BET_TYPE_FIRST_HALF_OU = 'first_half_ou'
+const BET_TYPE_FIRST_HALF_1X2 = 'first_half_1x2'
 const BET_TYPE_CORNERS = 'corners'
 const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
 const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
@@ -85,7 +90,15 @@ function mapOneXTwoValue(result) {
 
 function isOverUnderFamilyBetType(betType) {
   const normalized = String(betType).toLowerCase()
-  return normalized === BET_TYPE_OVER_UNDER || normalized === BET_TYPE_HOME_OU || normalized === BET_TYPE_AWAY_OU
+  return (
+    normalized === BET_TYPE_OVER_UNDER
+    || normalized === BET_TYPE_HOME_OU
+    || normalized === BET_TYPE_AWAY_OU
+    || normalized === BET_TYPE_ONE_X_TWO_OU
+    || normalized === BET_TYPE_DOUBLE_CHANCE_OU
+    || normalized === BET_TYPE_BTTS_OU
+    || normalized === BET_TYPE_FIRST_HALF_OU
+  )
 }
 
 function isCornersBetType(betType) {
@@ -139,6 +152,10 @@ function buildOneXTwoBars(matches = []) {
       value: mapped.value,
       color: mapped.color,
       result: m.result,
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
+      team_h1_goals: m.team_h1_goals,
+      opponent_h1_goals: m.opponent_h1_goals,
       match_id: m.match_id,
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
@@ -156,6 +173,8 @@ function buildDoubleChanceBars(matches = []) {
       color: hitFlag === 'H' ? '#2ecc71' : '#e74c3c',
       result: m.result || '',
       double_chance_result: hitFlag,
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
       match_id: m.match_id,
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
@@ -194,6 +213,8 @@ function buildWehBars(matches = []) {
       value: wonEither ? 1.0 : 0.1,
       color: wonEither ? '#2ecc71' : '#e74c3c',
       weh_result: wonEither ? 'Y' : 'N',
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
       team_h1_goals: Number(m.team_h1_goals ?? 0),
       opponent_h1_goals: Number(m.opponent_h1_goals ?? 0),
       team_h2_goals: Number(m.team_h2_goals ?? 0),
@@ -216,6 +237,8 @@ function buildWbhBars(matches = []) {
       value: wonBoth ? 1.0 : 0.1,
       color: wonBoth ? '#2ecc71' : '#e74c3c',
       wbh_result: wonBoth ? 'Y' : 'N',
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
       team_h1_goals: Number(m.team_h1_goals ?? 0),
       opponent_h1_goals: Number(m.opponent_h1_goals ?? 0),
       team_h2_goals: Number(m.team_h2_goals ?? 0),
@@ -227,22 +250,73 @@ function buildWbhBars(matches = []) {
 }
 
 function buildOverUnderBars(matches = [], line = 2.5, betType = BET_TYPE_OVER_UNDER) {
-  const isTeamGoalsMode = String(betType).toLowerCase() === BET_TYPE_HOME_OU || String(betType).toLowerCase() === BET_TYPE_AWAY_OU
+  const normalizedBet = String(betType).toLowerCase()
+  const isTeamGoalsMode = normalizedBet === BET_TYPE_HOME_OU || normalizedBet === BET_TYPE_AWAY_OU
+  const isOneXTwoOuMode = normalizedBet === BET_TYPE_ONE_X_TWO_OU
+  const isDoubleChanceOuMode = normalizedBet === BET_TYPE_DOUBLE_CHANCE_OU
+  const isBttsOuMode = normalizedBet === BET_TYPE_BTTS_OU
   return matches.map((m, idx) => {
     const rawGoals = Number(isTeamGoalsMode ? (m.team_goals ?? 0) : (m.total_goals ?? 0))
     const safeGoals = Number.isFinite(rawGoals) ? rawGoals : 0
-    const plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
     const fallbackOpponent = `Opponent ${m.opponent_id ?? idx + 1}`
     const label = m.chart_label || (m.venue === 'away' ? `@ ${m.opponent_name || fallbackOpponent}` : `vs ${m.opponent_name || fallbackOpponent}`)
-    const result = safeGoals > line ? 'O' : 'U'
+    const overUnderResult = safeGoals > line ? 'O' : 'U'
+
+    // ── 1X2 + O/U: only green when team wins AND over the line ──
+    // Default to 0 for every game the team does not win.
+    let plottedGoals
+    let barColor
+    if (isOneXTwoOuMode) {
+      if (m.result === 'W' && overUnderResult === 'O') {
+        plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
+        barColor = '#2ecc71'
+      } else {
+        plottedGoals = 0.1
+        barColor = '#e74c3c'
+      }
+      // ── Double Chance + O/U: only green when team did not lose AND over the line ──
+      // Default to 0 for every game the team lost.
+    } else if (isDoubleChanceOuMode) {
+      if (m.result !== 'L' && overUnderResult === 'O') {
+        plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
+        barColor = '#2ecc71'
+      } else {
+        plottedGoals = 0.1
+        barColor = '#e74c3c'
+      }
+      // ── BTTS + O/U: only green when BTTS is true AND over the line ──
+    } else if (isBttsOuMode) {
+      const isBtts = m.btts_result
+        ? m.btts_result === 'Y'
+        : (Number(m.goals_scored ?? 0) > 0 && Number(m.opponent_goals ?? 0) > 0)
+      if (isBtts && overUnderResult === 'O') {
+        plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
+        barColor = '#2ecc71'
+      } else {
+        plottedGoals = 0
+        barColor = '#e74c3c'
+      }
+      // ── Standard O/U: colour based on goals vs line only ──
+    } else {
+      plottedGoals = safeGoals === 0 ? 0.1 : safeGoals
+      barColor = overUnderResult === 'O' ? '#2ecc71' : '#e74c3c'
+    }
+
     return {
       label,
       value: plottedGoals,
       total_goals: isTeamGoalsMode ? undefined : safeGoals,
       team_goals: isTeamGoalsMode ? safeGoals : undefined,
       goals_metric_name: isTeamGoalsMode ? 'Team Goals' : 'Total Goals',
-      color: result === 'O' ? '#2ecc71' : '#e74c3c',
-      over_under_result: result,
+      color: barColor,
+      over_under_result: overUnderResult,
+      result: m.result,
+      double_chance_result: m.double_chance_result,
+      btts_result: m.btts_result,
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
+      team_h1_goals: m.team_h1_goals,
+      opponent_h1_goals: m.opponent_h1_goals,
       match_id: m.match_id,
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
@@ -255,21 +329,21 @@ function getTotalCornersValue(row = {}) {
 
   const homeCorners = Number(
     row.home_corners
-      ?? row._raw?.home_corners
-      ?? row.corners_home
-      ?? row._raw?.corners_home
-      ?? row.corner_kicks_home
-      ?? row._raw?.corner_kicks_home
-      ?? 0
+    ?? row._raw?.home_corners
+    ?? row.corners_home
+    ?? row._raw?.corners_home
+    ?? row.corner_kicks_home
+    ?? row._raw?.corner_kicks_home
+    ?? 0
   )
   const awayCorners = Number(
     row.away_corners
-      ?? row._raw?.away_corners
-      ?? row.corners_away
-      ?? row._raw?.corners_away
-      ?? row.corner_kicks_away
-      ?? row._raw?.corner_kicks_away
-      ?? 0
+    ?? row._raw?.away_corners
+    ?? row.corners_away
+    ?? row._raw?.corners_away
+    ?? row.corner_kicks_away
+    ?? row._raw?.corner_kicks_away
+    ?? 0
   )
   const safeHome = Number.isFinite(homeCorners) ? homeCorners : 0
   const safeAway = Number.isFinite(awayCorners) ? awayCorners : 0
@@ -288,10 +362,19 @@ function buildCornerBars(matches = [], line = 8.5) {
       total_corners: safeCorners,
       color: result === 'O' ? '#2ecc71' : '#e74c3c',
       corners_over_under_result: result,
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
       match_id: m.match_id,
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
   })
+}
+
+function formatScoreline(row) {
+  if (!row) return ''
+  const scored = Number(row.goals_scored ?? row._raw?.goals_scored ?? 0)
+  const conceded = Number(row.opponent_goals ?? row._raw?.opponent_goals ?? 0)
+  return `${formatYAxisTick(scored)}-${formatYAxisTick(conceded)}`
 }
 
 function readSeriesMax(data = []) {
@@ -551,7 +634,16 @@ function computeHitRate(rows, betType) {
   if (total === 0) return { percent: null, hits: 0, total: 0 }
 
   let hits = 0
-  if (isOverUnderFamilyBetType(normalizedBetType)) {
+  if (normalizedBetType === BET_TYPE_ONE_X_TWO_OU) {
+    // 1X2 + O/U: hit only when team won AND goals over the line
+    hits = rows.filter(row => row.result === 'W' && row.over_under_result === 'O').length
+  } else if (normalizedBetType === BET_TYPE_DOUBLE_CHANCE_OU) {
+    // Double Chance + O/U: hit when team did not lose AND goals over the line
+    hits = rows.filter(row => row.result !== 'L' && row.over_under_result === 'O').length
+  } else if (normalizedBetType === BET_TYPE_BTTS_OU) {
+    // BTTS + O/U: hit only when BTTS is true AND goals over the line
+    hits = rows.filter(row => row.btts_result === 'Y' && row.over_under_result === 'O').length
+  } else if (isOverUnderFamilyBetType(normalizedBetType)) {
     hits = rows.filter(row => row.over_under_result === 'O').length
   } else if (isCornersBetType(normalizedBetType)) {
     hits = rows.filter(row => row.corners_over_under_result === 'O').length
@@ -627,6 +719,9 @@ function getAverageMetricLabel(betType) {
   const normalizedBetType = String(betType).toLowerCase()
   const isTeamGoalsMode = normalizedBetType === BET_TYPE_HOME_OU || normalizedBetType === BET_TYPE_AWAY_OU
 
+  if (normalizedBetType === BET_TYPE_FIRST_HALF_OU) {
+    return '1H Goals Avg'
+  }
   if (isOverUnderFamilyBetType(normalizedBetType)) {
     return isTeamGoalsMode ? 'Team Goals Avg' : 'Total Goals Avg'
   }
@@ -660,6 +755,18 @@ function getLineSummaryLabel(betType, line) {
 
   if (normalizedBetType === BET_TYPE_OVER_UNDER) {
     return `Over/Under ${lineText} Total Goals`
+  }
+  if (normalizedBetType === BET_TYPE_ONE_X_TWO_OU) {
+    return `1X2 + O/U ${lineText} Total Goals`
+  }
+  if (normalizedBetType === BET_TYPE_DOUBLE_CHANCE_OU) {
+    return `Double Chance + O/U ${lineText} Total Goals`
+  }
+  if (normalizedBetType === BET_TYPE_BTTS_OU) {
+    return `BTTS + O/U ${lineText} Total Goals`
+  }
+  if (normalizedBetType === BET_TYPE_FIRST_HALF_OU) {
+    return `1st Half O/U ${lineText} Goals`
   }
   if (normalizedBetType === BET_TYPE_HOME_OU) {
     return `Home Over/Under ${lineText} Team Goals`
@@ -725,6 +832,7 @@ function TeamBarChart({
   onReferenceLineDragCommit,
   layoutVersion,
   overlayConfig,
+  opponentRankOverride,
   isFiltersOpen,
   onToggleFilters,
   seasonAvgOverride,
@@ -768,6 +876,11 @@ function TeamBarChart({
   const isOverUnder = isOverUnderFamilyBetType(normalizedBetType)
   const isCorners = isCornersBetType(normalizedBetType)
   const isLineType = isOverUnder || isCorners
+  const isOneXTwoOu = normalizedBetType === BET_TYPE_ONE_X_TWO_OU
+  const isDoubleChanceOu = normalizedBetType === BET_TYPE_DOUBLE_CHANCE_OU
+  const isBttsOu = normalizedBetType === BET_TYPE_BTTS_OU
+  const isFirstHalfOu = normalizedBetType === BET_TYPE_FIRST_HALF_OU
+  const isFirstHalf1X2 = normalizedBetType === BET_TYPE_FIRST_HALF_1X2
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
   const isBtts = normalizedBetType === BET_TYPE_BTTS
   const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
@@ -789,8 +902,16 @@ function TeamBarChart({
   const averageMetricLabel = getAverageMetricLabel(normalizedBetType)
   const lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
   const hasLineSummaryLabel = Boolean(lineSummaryLabel)
-  const hasOverlay = Boolean(overlayConfig && data.some(d => d.overlayValue != null))
-  const overlayAvg = hasOverlay ? computeOverlayAvg(data) : null
+  const isOpponentRankOverlay = Boolean(overlayConfig && String(overlayConfig.field || '').startsWith('opponent_rank_'))
+  const opponentRankValue = isOpponentRankOverlay
+    ? Number(opponentRankOverride?.[overlayConfig.field])
+    : null
+  const hasOverlay = Boolean(
+    overlayConfig && (data.some(d => d.overlayValue != null) || Number.isFinite(opponentRankValue))
+  )
+  const overlayAvg = hasOverlay
+    ? (Number.isFinite(opponentRankValue) ? opponentRankValue : computeOverlayAvg(data))
+    : null
   const overlayScale = hasOverlay ? buildOverlayYAxisScale(data) : null
   const firstRow = data[0] || null
   const teamIdFromRaw = Number(
@@ -940,7 +1061,11 @@ function TeamBarChart({
           {hasOverlay && overlayAvg != null ? (
             <div className="pm-metric-cell">
               <span className="pm-metric-label">{overlayConfig.label}</span>
-              <span className="pm-metric-value">{overlayAvg.toFixed(2)}</span>
+              <span className="pm-metric-value">
+                {Number.isFinite(opponentRankValue)
+                  ? opponentRankValue.toFixed(0)
+                  : overlayAvg.toFixed(2)}
+              </span>
             </div>
           ) : null}
           {typeof onToggleFilters === 'function' ? (
@@ -1030,34 +1155,35 @@ function TeamBarChart({
                 labelFormatter={(_, payload) => {
                   const row = payload?.[0]?.payload
                   if (!row) return ''
+                  const scoreline = formatScoreline(row)
                   if (isOverUnder) {
                     const metricLabel = row.goals_metric_name || 'Goals'
                     const metricValue = row.total_goals ?? row.team_goals ?? 0
-                    return `${row.fixture_display} | ${row.date_label} | ${metricLabel} ${Number(metricValue).toFixed(1)} | ${row.over_under_result}`
+                    return `${row.fixture_display} | ${row.date_label} | ${metricLabel} ${Number(metricValue).toFixed(1)} | ${row.over_under_result} | ${scoreline}`
                   }
                   if (isCorners) {
-                    return `${row.fixture_display} | ${row.date_label} | Total Corners ${getTotalCornersValue(row).toFixed(1)}`
+                    return `${row.fixture_display} | ${row.date_label} | Total Corners ${getTotalCornersValue(row).toFixed(1)} | ${scoreline}`
                   }
                   if (isDoubleChance) {
-                    return `${row.fixture_display} | ${row.date_label} | ${row.result || ''} | ${row.double_chance_result === 'H' ? 'Hit' : 'Miss'}`
+                    return `${row.fixture_display} | ${row.date_label} | ${row.result || ''} | ${row.double_chance_result === 'H' ? 'Hit' : 'Miss'} | ${scoreline}`
                   }
                   if (isBtts) {
                     const bttsLabel = row.btts_result === 'Y' ? 'BTTS Yes' : 'BTTS No'
-                    return `${row.fixture_display} | ${row.date_label} | ${bttsLabel} | ${Number(row.goals_scored ?? 0)}-${Number(row.opponent_goals ?? 0)}`
+                    return `${row.fixture_display} | ${row.date_label} | ${bttsLabel} | ${scoreline}`
                   }
                   if (isWeh) {
                     const wehLabel = row.weh_result === 'Y' ? 'Won Half' : 'No Half Won'
                     const h1 = `H1: ${Number(row.team_h1_goals ?? 0)}-${Number(row.opponent_h1_goals ?? 0)}`
                     const h2 = `H2: ${Number(row.team_h2_goals ?? 0)}-${Number(row.opponent_h2_goals ?? 0)}`
-                    return `${row.fixture_display} | ${row.date_label} | ${wehLabel} | ${h1}, ${h2}`
+                    return `${row.fixture_display} | ${row.date_label} | ${wehLabel} | ${h1}, ${h2} | ${scoreline}`
                   }
                   if (isWbh) {
                     const wbhLabel = row.wbh_result === 'Y' ? 'Won Both' : 'Did Not Win Both'
                     const h1 = `H1: ${Number(row.team_h1_goals ?? 0)}-${Number(row.opponent_h1_goals ?? 0)}`
                     const h2 = `H2: ${Number(row.team_h2_goals ?? 0)}-${Number(row.opponent_h2_goals ?? 0)}`
-                    return `${row.fixture_display} | ${row.date_label} | ${wbhLabel} | ${h1}, ${h2}`
+                    return `${row.fixture_display} | ${row.date_label} | ${wbhLabel} | ${h1}, ${h2} | ${scoreline}`
                   }
-                  return `${row.fixture_display} | ${row.date_label} | Result ${row.result}`
+                  return `${row.fixture_display} | ${row.date_label} | Result ${row.result} | ${scoreline}`
                 }}
               />
               <Bar yAxisId="left" dataKey="value" radius={[4, 4, 0, 0]} barSize={barSize}>
@@ -1139,6 +1265,7 @@ export default memo(function ChartArea({
   isFiltersOpen = false,
   onToggleFilters,
   activeOverlayFilter,
+  opponentRanks,
 }) {
   const activeTeamView = teamView ?? VIEW_BOTH
 
@@ -1280,6 +1407,7 @@ export default memo(function ChartArea({
             onReferenceLineDragCommit={commitLine}
             layoutVersion={layoutVersion}
             overlayConfig={overlayConfig}
+            opponentRankOverride={opponentRanks?.home_team || null}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}
             seasonAvgOverride={homeSeasonAvg}
@@ -1297,6 +1425,7 @@ export default memo(function ChartArea({
             onReferenceLineDragCommit={commitLine}
             layoutVersion={layoutVersion}
             overlayConfig={overlayConfig}
+            opponentRankOverride={opponentRanks?.away_team || null}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}
             seasonAvgOverride={awaySeasonAvg}

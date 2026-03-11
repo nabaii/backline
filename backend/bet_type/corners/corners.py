@@ -121,7 +121,7 @@ class CornerWorkspace(CornersWorkspaceContract):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["total_corners", "home_corners", "away_corners"],
+            required_features=["total_corners", "home_corners", "away_corners", "goals_scored", "opponent_goals"],
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
