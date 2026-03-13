@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from backend.backend_api import (
     _load_raw_df,
+    _normalize_team_name,
     _opponent_rank_maps_for_league,
     _resolve_team_anchor_match,
     _build_store,
@@ -43,12 +44,12 @@ def profile_team(
         if "opponent_rank_xgd_range" in rank_maps:
             xgd_map = rank_maps["opponent_rank_xgd_range"]
             league_size = len(xgd_map)
-            # Try to match the name (basic normalization)
-            norm_name = team_name.lower().replace(" ", "").replace("_", "")
-            # Direct match or iterate
+            # Use the same normalization as the rank map builder
+            norm_name = _normalize_team_name(team_name)
             if norm_name in xgd_map:
                 xgd_season_rank = xgd_map[norm_name]
             else:
+                # Fallback: substring match
                 for rank_name, rank_val in xgd_map.items():
                     if rank_name in norm_name or norm_name in rank_name:
                         xgd_season_rank = rank_val
@@ -73,7 +74,7 @@ def profile_team(
                 match_id=anchor_match_id,
                 bet_type="one_x_two",  # basic bet type to get general history
                 perspective=anchor_perspective,
-                filters={},
+                filters=[],
                 required_features=["expected_goals_home", "expected_goals_away"],
                 home_team_id=team_id if anchor_perspective == "home" else -1,
                 away_team_id=team_id if anchor_perspective == "away" else -1,

@@ -150,8 +150,8 @@ def build_hit_rates_for_team(
     request = EvidenceRequest(
         match_id=anchor_match_id,
         bet_type=intent.bet_type,
-        perspective="all",  # Start with all to get full season
-        filters={},
+        perspective=anchor_perspective,
+        filters=[],
         required_features=[
             "total_goals",
             "goals_scored",

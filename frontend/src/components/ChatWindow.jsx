@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { chatStream, analyzeBetSlip } from '../api/backendApi'
 import ChatMiniChart from './ChatMiniChart'
 import BetSlipThread from './BetSlipThread'
@@ -359,7 +360,9 @@ export default function ChatWindow({ selectedFixture, onNavigateToKitchen }) {
                   className={`chat-message chat-message--${msg.role}${msg.error ? ' chat-message--error' : ''}`}
                 >
                   {msg.text
-                    ? msg.text
+                    ? msg.role === 'assistant'
+                      ? <ReactMarkdown>{msg.text}</ReactMarkdown>
+                      : msg.text
                     : msg.role === 'assistant'
                       ? <span className="chat-typing-cursor" />
                       : null}
