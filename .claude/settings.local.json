@@ -38,7 +38,9 @@
       "Bash(python -c \"from ddgs import DDGS; ddgs = DDGS\\(\\); results = list\\(ddgs.text\\(''Torino vs Parma injuries lineup 2026'', max_results=5\\)\\); print\\(len\\(results\\)\\); [print\\(r[''title'']\\) for r in results]\")",
       "Bash(npm install:*)",
       "Bash(ls -la --time-style=long-iso \"c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues\"/*/season_df.csv)",
-      "Bash(python -u data/raw/scrape_data.py --mode multi-league-scrape --leagues \"England Premier League\" \"France Ligue 1\" \"Germany Bundesliga\" \"Italy Serie A\" \"Spain La Liga\")"
+      "Bash(python -u data/raw/scrape_data.py --mode multi-league-scrape --leagues \"England Premier League\" \"France Ligue 1\" \"Germany Bundesliga\" \"Italy Serie A\" \"Spain La Liga\")",
+      "Bash(find /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src -type f \\\\\\(-name *.tsx -o -name *.ts -o -name *.jsx -o -name *.js \\\\\\))",
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''''backend''''\\); from backend_api import create_app; app = create_app\\(\\); print\\(''''App created successfully''''\\)\")"
     ]
   }
 }

@@ -77,6 +77,35 @@ class MatchAnalytics(MatchAnalyticsContract):
         }
             
 
+def _safe_int(value, default: int = 0) -> int:
+    """Convert a value to int, returning *default* when the value is NaN/None."""
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """Convert a value to float, returning *default* when the value is NaN/None."""
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        pass
+    try:
+        result = float(value)
+        if not pd.notna(result):
+            return default
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
 class MatchAnalyticsBuilder:
     """
     Builds MatchAnalytics objects from raw match data.
@@ -127,23 +156,23 @@ class MatchAnalyticsBuilder:
             away_corners = 0.0
         
         available_features = {
-            "home_momentum": match_df["home_momentum"].iloc[0],
-            "away_momentum": match_df["away_momentum"].iloc[0],
-            "xg_diff": match_df["xg_diff"].iloc[0],  # For XGDifferenceFilter
-            "xg_diff_home": match_df["xg_diff_home"].iloc[0],
-            "xg_diff_away": match_df["xg_diff_away"].iloc[0],
-            "total_goals": match_df["total_goals"].iloc[0],
+            "home_momentum": _safe_float(match_df["home_momentum"].iloc[0]),
+            "away_momentum": _safe_float(match_df["away_momentum"].iloc[0]),
+            "xg_diff": _safe_float(match_df["xg_diff"].iloc[0]),  # For XGDifferenceFilter
+            "xg_diff_home": _safe_float(match_df["xg_diff_home"].iloc[0]),
+            "xg_diff_away": _safe_float(match_df["xg_diff_away"].iloc[0]),
+            "total_goals": _safe_float(match_df["total_goals"].iloc[0]),
             "home_corners": float(home_corners),
             "away_corners": float(away_corners),
             "total_corners": float(home_corners) + float(away_corners),
-            "home_normaltime": home_goals,  # For HomeTotalGoals
-            "away_normaltime": away_goals,  # For AwayTotalGoals
-            "expected_goals_home": match_df["expected_goals_home"].iloc[0],
-            "expected_goals_away": match_df["expected_goals_away"].iloc[0],
-            "ball_possession_home": match_df["ball_possession_home"].iloc[0],
-            "ball_possession_away": match_df["ball_possession_away"].iloc[0],
-            "field_tilt_home": match_df["field_tilt_home"].iloc[0],
-            "field_tilt_away": match_df["field_tilt_away"].iloc[0],
+            "home_normaltime": _safe_float(home_goals),  # For HomeTotalGoals
+            "away_normaltime": _safe_float(away_goals),  # For AwayTotalGoals
+            "expected_goals_home": _safe_float(match_df["expected_goals_home"].iloc[0]),
+            "expected_goals_away": _safe_float(match_df["expected_goals_away"].iloc[0]),
+            "ball_possession_home": _safe_float(match_df["ball_possession_home"].iloc[0]),
+            "ball_possession_away": _safe_float(match_df["ball_possession_away"].iloc[0]),
+            "field_tilt_home": _safe_float(match_df["field_tilt_home"].iloc[0]),
+            "field_tilt_away": _safe_float(match_df["field_tilt_away"].iloc[0]),
             "home_shots": self._json_shot_payload(
                 match_df["home_shots"].iloc[0] if "home_shots" in match_df.columns else None
             ),
@@ -151,17 +180,17 @@ class MatchAnalyticsBuilder:
                 match_df["away_shots"].iloc[0] if "away_shots" in match_df.columns else None
             ),
             # Perspective-aware goals_scored: swapped when for_perspective("away") is called
-            "home_goals_scored": home_goals,  # For GoalsScored filter (home perspective)
-            "away_goals_scored": away_goals,  # For GoalsScored filter (away perspective)
+            "home_goals_scored": _safe_float(home_goals),  # For GoalsScored filter (home perspective)
+            "away_goals_scored": _safe_float(away_goals),  # For GoalsScored filter (away perspective)
             # Penalty goal counts for NPG toggle
-            "penalty_goals_home": int(match_df["penalty_goals_home"].iloc[0]) if "penalty_goals_home" in match_df.columns else 0,
-            "penalty_goals_away": int(match_df["penalty_goals_away"].iloc[0]) if "penalty_goals_away" in match_df.columns else 0,
-            "total_penalty_goals": int(match_df["total_penalty_goals"].iloc[0]) if "total_penalty_goals" in match_df.columns else 0,
+            "penalty_goals_home": _safe_int(match_df["penalty_goals_home"].iloc[0]) if "penalty_goals_home" in match_df.columns else 0,
+            "penalty_goals_away": _safe_int(match_df["penalty_goals_away"].iloc[0]) if "penalty_goals_away" in match_df.columns else 0,
+            "total_penalty_goals": _safe_int(match_df["total_penalty_goals"].iloc[0]) if "total_penalty_goals" in match_df.columns else 0,
             # Half-time goal features for Win Either Half bet type
-            "home_h1_goals": int(match_df["home_h1_goals"].iloc[0]) if "home_h1_goals" in match_df.columns else 0,
-            "home_h2_goals": int(match_df["home_h2_goals"].iloc[0]) if "home_h2_goals" in match_df.columns else 0,
-            "away_h1_goals": int(match_df["away_h1_goals"].iloc[0]) if "away_h1_goals" in match_df.columns else 0,
-            "away_h2_goals": int(match_df["away_h2_goals"].iloc[0]) if "away_h2_goals" in match_df.columns else 0,
+            "home_h1_goals": _safe_int(match_df["home_h1_goals"].iloc[0]) if "home_h1_goals" in match_df.columns else 0,
+            "home_h2_goals": _safe_int(match_df["home_h2_goals"].iloc[0]) if "home_h2_goals" in match_df.columns else 0,
+            "away_h1_goals": _safe_int(match_df["away_h1_goals"].iloc[0]) if "away_h1_goals" in match_df.columns else 0,
+            "away_h2_goals": _safe_int(match_df["away_h2_goals"].iloc[0]) if "away_h2_goals" in match_df.columns else 0,
         }
 
         self.feature_keys.update(available_features.keys())
