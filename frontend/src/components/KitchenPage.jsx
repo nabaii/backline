@@ -52,7 +52,7 @@ function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
 }
 
 export default function KitchenPage() {
-  const [activeTab, setActiveTab] = useState('main')
+  const [activeTab, setActiveTab] = useState('kitchen')
   const [leagues, setLeagues] = useState([])
   const [selectedLeague, setSelectedLeague] = useState(null)
   const [fixtures, setFixtures] = useState([])
