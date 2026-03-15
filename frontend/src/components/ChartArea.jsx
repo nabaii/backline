@@ -49,23 +49,24 @@ const MOBILE_CHART_BREAKPOINT = 700
 
 // Map filter keys to the match data fields we can overlay
 const OVERLAY_FIELD_MAP = {
-  team_momentum_range: { field: 'team_momentum_range', label: 'Momentum', color: '#2d6bff' },
-  opponent_momentum_range: { field: 'opponent_momentum_range', label: 'Opp Momentum', color: '#2d6bff' },
-  total_match_goals_range: { field: 'total_match_goals_range', label: 'Total Goals', color: '#2d6bff' },
-  team_goals_range: { field: 'team_goals_range', label: 'Goals', color: '#2d6bff' },
-  opposition_goals_range: { field: 'opposition_goals_range', label: 'Opp Goals', color: '#2d6bff' },
-  team_xg_range: { field: 'team_xg', label: 'xG', color: '#2d6bff' },
-  opposition_xg_range: { field: 'opponent_xg', label: 'Opp xG', color: '#2d6bff' },
-  team_possession_range: { field: 'team_possession_range', label: 'Possession', color: '#2d6bff' },
-  opposition_possession_range: { field: 'opposition_possession_range', label: 'Opp Poss', color: '#2d6bff' },
-  field_tilt_range: { field: 'field_tilt_range', label: 'Field Tilt', color: '#2d6bff' },
-  opponent_rank_xgd_range: { field: 'opponent_rank_xgd_range', label: 'Opp Rank xGD', color: '#2d6bff' },
-  opponent_rank_xgf_range: { field: 'opponent_rank_xgf_range', label: 'Opp Rank xGF', color: '#2d6bff' },
-  opponent_rank_xga_range: { field: 'opponent_rank_xga_range', label: 'Opp Rank xGA', color: '#2d6bff' },
-  opponent_rank_position_range: { field: 'opponent_rank_position_range', label: 'Opp Rank Position', color: '#2d6bff' },
-  opponent_rank_corners_range: { field: 'opponent_rank_corners_range', label: 'Opp Rank Corners', color: '#2d6bff' },
-  opponent_rank_momentum_range: { field: 'opponent_rank_momentum_range', label: 'Opp Rank Momentum', color: '#2d6bff' },
-  opponent_rank_possession_range: { field: 'opponent_rank_possession_range', label: 'Opp Rank Poss', color: '#2d6bff' },
+  team_momentum_range: { field: 'team_momentum_range', label: 'Momentum', color: '#3b82f6' },
+  opponent_momentum_range: { field: 'opponent_momentum_range', label: 'Opp Momentum', color: '#f97316' },
+  total_match_goals_range: { field: 'total_match_goals_range', label: 'Total Goals', color: '#a855f7' },
+  team_goals_range: { field: 'team_goals_range', label: 'Goals', color: '#22c55e' },
+  opposition_goals_range: { field: 'opposition_goals_range', label: 'Opp Goals', color: '#ef4444' },
+  team_xg_range: { field: 'team_xg', label: 'xG', color: '#3b82f6' },
+  opposition_xg_range: { field: 'opponent_xg', label: 'Opp xG', color: '#f97316' },
+  total_xg_range: { field: 'total_xg', label: 'Total xG', color: '#a855f7' },
+  team_possession_range: { field: 'team_possession_range', label: 'Possession', color: '#06b6d4' },
+  opposition_possession_range: { field: 'opposition_possession_range', label: 'Opp Poss', color: '#ec4899' },
+  field_tilt_range: { field: 'field_tilt_range', label: 'Field Tilt', color: '#84cc16' },
+  opponent_rank_xgd_range: { field: 'opponent_rank_xgd_range', label: 'Opp Rank xGD', color: '#3b82f6' },
+  opponent_rank_xgf_range: { field: 'opponent_rank_xgf_range', label: 'Opp Rank xGF', color: '#22c55e' },
+  opponent_rank_xga_range: { field: 'opponent_rank_xga_range', label: 'Opp Rank xGA', color: '#ef4444' },
+  opponent_rank_position_range: { field: 'opponent_rank_position_range', label: 'Opp Rank Position', color: '#f97316' },
+  opponent_rank_corners_range: { field: 'opponent_rank_corners_range', label: 'Opp Rank Corners', color: '#a855f7' },
+  opponent_rank_momentum_range: { field: 'opponent_rank_momentum_range', label: 'Opp Rank Momentum', color: '#06b6d4' },
+  opponent_rank_possession_range: { field: 'opponent_rank_possession_range', label: 'Opp Rank Poss', color: '#ec4899' },
 }
 
 function normalizeLineValue(rawValue) {
@@ -492,10 +493,14 @@ function computeBarSize(plotWidth, totalBars) {
   return Math.max(2, Math.min(40, rawBarSize))
 }
 
-function buildOverlayYAxisScale(data = []) {
-  const values = data
-    .map(row => Number(row?.overlayValue))
-    .filter(value => Number.isFinite(value))
+function buildOverlayYAxisScale(data = [], overlayKeys = []) {
+  const values = []
+  for (const row of data) {
+    for (const key of overlayKeys) {
+      const v = Number(row?.[key])
+      if (Number.isFinite(v)) values.push(v)
+    }
+  }
   if (!values.length) return null
 
   const rawMin = Math.min(...values)
@@ -780,41 +785,51 @@ function getLineSummaryLabel(betType, line) {
   return null
 }
 
-// Enrich chart data with overlay field values
-function enrichWithOverlay(data, overlayConfig) {
-  if (!overlayConfig) return data
+// Resolve a single overlay value for one row
+function resolveOverlayValue(row, overlayField) {
+  const raw = row._raw || {}
+  const directValue = Number(raw[overlayField])
+  if (Number.isFinite(directValue)) return directValue
+  if (overlayField === 'team_xg' || overlayField === 'opponent_xg' || overlayField === 'total_xg') {
+    // Try computing from team_xg + opponent_xg first (always available in overlay payload)
+    if (overlayField === 'total_xg') {
+      const tXg = Number(raw.team_xg)
+      const oXg = Number(raw.opponent_xg)
+      if (Number.isFinite(tXg) && Number.isFinite(oXg)) return tXg + oXg
+    }
+    // Fall back to expected_goals_home / expected_goals_away
+    const homeXg = Number(raw.expected_goals_home)
+    const awayXg = Number(raw.expected_goals_away)
+    const venue = String(row?.venue || raw?.venue || '').toLowerCase()
+    if (Number.isFinite(homeXg) && Number.isFinite(awayXg)) {
+      if (overlayField === 'total_xg') return homeXg + awayXg
+      if (overlayField === 'team_xg') return venue === 'away' ? awayXg : homeXg
+      return venue === 'away' ? homeXg : awayXg
+    }
+  }
+  return null
+}
+
+// Enrich chart data with overlay field values (supports multiple overlays)
+function enrichWithOverlays(data, overlayConfigs) {
+  if (!overlayConfigs || overlayConfigs.length === 0) return data
   return data.map(row => {
-    const raw = row._raw || {}
-    const directValue = Number(raw[overlayConfig.field])
-    let fallbackValue = null
-    if (!Number.isFinite(directValue) && (overlayConfig.field === 'team_xg' || overlayConfig.field === 'opponent_xg')) {
-      const homeXg = Number(raw.expected_goals_home)
-      const awayXg = Number(raw.expected_goals_away)
-      const venue = String(row?.venue || raw?.venue || '').toLowerCase()
-      if (Number.isFinite(homeXg) && Number.isFinite(awayXg)) {
-        if (overlayConfig.field === 'team_xg') {
-          fallbackValue = venue === 'away' ? awayXg : homeXg
-        } else {
-          fallbackValue = venue === 'away' ? homeXg : awayXg
-        }
-      }
+    const enriched = { ...row }
+    for (const cfg of overlayConfigs) {
+      enriched[`overlay_${cfg.key}`] = resolveOverlayValue(row, cfg.field)
     }
-    return {
-      ...row,
-      overlayValue: Number.isFinite(directValue)
-        ? directValue
-        : (Number.isFinite(fallbackValue) ? fallbackValue : null),
-    }
+    return enriched
   })
 }
 
-// Compute overlay graph avg and season avg
-function computeOverlayAvg(data) {
+// Compute overlay graph avg for a specific data key
+function computeOverlayAvg(data, dataKey) {
   let sum = 0
   let count = 0
   for (const row of data) {
-    if (row.overlayValue != null) {
-      sum += row.overlayValue
+    const val = row[dataKey]
+    if (val != null && Number.isFinite(val)) {
+      sum += val
       count++
     }
   }
@@ -831,7 +846,7 @@ function TeamBarChart({
   onReferenceLineDragChange,
   onReferenceLineDragCommit,
   layoutVersion,
-  overlayConfig,
+  overlayConfigs = [],
   opponentRankOverride,
   isFiltersOpen,
   onToggleFilters,
@@ -902,17 +917,12 @@ function TeamBarChart({
   const averageMetricLabel = getAverageMetricLabel(normalizedBetType)
   const lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
   const hasLineSummaryLabel = Boolean(lineSummaryLabel)
-  const isOpponentRankOverlay = Boolean(overlayConfig && String(overlayConfig.field || '').startsWith('opponent_rank_'))
-  const opponentRankValue = isOpponentRankOverlay
-    ? Number(opponentRankOverride?.[overlayConfig.field])
-    : null
-  const hasOverlay = Boolean(
-    overlayConfig && (data.some(d => d.overlayValue != null) || Number.isFinite(opponentRankValue))
+  // Multi-overlay support
+  const overlayDataKeys = overlayConfigs.map(cfg => `overlay_${cfg.key}`)
+  const hasOverlay = overlayConfigs.length > 0 && data.some(d =>
+    overlayDataKeys.some(dk => d[dk] != null)
   )
-  const overlayAvg = hasOverlay
-    ? (Number.isFinite(opponentRankValue) ? opponentRankValue : computeOverlayAvg(data))
-    : null
-  const overlayScale = hasOverlay ? buildOverlayYAxisScale(data) : null
+  const overlayScale = hasOverlay ? buildOverlayYAxisScale(data, overlayDataKeys) : null
   const firstRow = data[0] || null
   const teamIdFromRaw = Number(
     firstRow?.venue === 'home'
@@ -1058,16 +1068,21 @@ function TeamBarChart({
               <span className="pm-metric-value">{graphAvg.toFixed(2)}</span>
             </div>
           ) : null}
-          {hasOverlay && overlayAvg != null ? (
-            <div className="pm-metric-cell">
-              <span className="pm-metric-label">{overlayConfig.label}</span>
-              <span className="pm-metric-value">
-                {Number.isFinite(opponentRankValue)
-                  ? opponentRankValue.toFixed(0)
-                  : overlayAvg.toFixed(2)}
-              </span>
-            </div>
-          ) : null}
+          {hasOverlay ? overlayConfigs.map(cfg => {
+            const dk = `overlay_${cfg.key}`
+            const isRank = String(cfg.field || '').startsWith('opponent_rank_')
+            const rankVal = isRank ? Number(opponentRankOverride?.[cfg.field]) : null
+            const avg = Number.isFinite(rankVal) ? rankVal : computeOverlayAvg(data, dk)
+            if (avg == null) return null
+            return (
+              <div className="pm-metric-cell" key={cfg.key}>
+                <span className="pm-metric-label" style={{ color: cfg.color }}>{cfg.label}</span>
+                <span className="pm-metric-value">
+                  {Number.isFinite(rankVal) ? rankVal.toFixed(0) : avg.toFixed(2)}
+                </span>
+              </div>
+            )
+          }) : null}
           {typeof onToggleFilters === 'function' ? (
             <button
               className={`filters-toggle-btn ${isFiltersOpen ? 'active' : ''}`}
@@ -1127,8 +1142,9 @@ function TeamBarChart({
                 cursor={{ fill: 'rgba(255, 255, 255, 0.04)' }}
                 contentStyle={{ background: '#111114', borderColor: '#2a2a30', borderRadius: 10, color: '#edeef2', fontSize: '0.8rem' }}
                 formatter={(val, name, item) => {
-                  if (name === 'overlayValue' && overlayConfig) {
-                    return [formatYAxisTick(val), overlayConfig.label]
+                  if (typeof name === 'string' && name.startsWith('overlay_')) {
+                    const cfg = overlayConfigs.find(c => `overlay_${c.key}` === name)
+                    if (cfg) return [formatYAxisTick(val), cfg.label]
                   }
                   const metricName = item?.payload?.goals_metric_name
                   if (isOverUnder) {
@@ -1191,19 +1207,20 @@ function TeamBarChart({
                   <Cell key={`${entry.match_id}-${entry.label}-${entry.venue}`} fill={entry.color} />
                 ))}
               </Bar>
-              {hasOverlay && overlayScale ? (
+              {hasOverlay && overlayScale ? overlayConfigs.map(cfg => (
                 <Line
+                  key={cfg.key}
                   yAxisId="right"
                   type="linear"
-                  dataKey="overlayValue"
-                  stroke={overlayConfig?.color || '#2d6bff'}
+                  dataKey={`overlay_${cfg.key}`}
+                  stroke={cfg.color}
                   strokeWidth={2.2}
                   dot={false}
                   connectNulls
-                  activeDot={{ r: 3, strokeWidth: 0, fill: overlayConfig?.color || '#2d6bff' }}
+                  activeDot={{ r: 3, strokeWidth: 0, fill: cfg.color }}
                   isAnimationActive={false}
                 />
-              ) : null}
+              )) : null}
               {isLineType ? (
                 <ReferenceLine
                   yAxisId="left"
@@ -1240,12 +1257,12 @@ function TeamBarChart({
             <span>{isCorners ? 'Corners Line' : 'O/U Line'}</span>
           </div>
         ) : null}
-        {hasOverlay ? (
-          <div className="chart-legend-item">
-            <div className="chart-legend-swatch" style={{ background: overlayConfig?.color || '#2d6bff' }} />
-            <span>{overlayConfig?.label || 'Overlay'}</span>
+        {hasOverlay ? overlayConfigs.map(cfg => (
+          <div className="chart-legend-item" key={cfg.key}>
+            <div className="chart-legend-swatch" style={{ background: cfg.color }} />
+            <span>{cfg.label}</span>
           </div>
-        ) : null}
+        )) : null}
       </div>
     </div>
   )
@@ -1264,7 +1281,7 @@ export default memo(function ChartArea({
   teamView,
   isFiltersOpen = false,
   onToggleFilters,
-  activeOverlayFilter,
+  activeOverlayFilters,
   opponentRanks,
 }) {
   const activeTeamView = teamView ?? VIEW_BOTH
@@ -1280,8 +1297,16 @@ export default memo(function ChartArea({
   const line = isCorners ? normalizeCornersLineValue(cornersLine) : normalizeLineValue(overUnderLine)
   const layoutVersion = isFiltersOpen ? 'open' : 'closed'
 
-  // Get overlay configuration
-  const overlayConfig = activeOverlayFilter ? OVERLAY_FIELD_MAP[activeOverlayFilter] || null : null
+  // Build overlay configurations from the active set
+  const overlayConfigs = useMemo(() => {
+    if (!activeOverlayFilters || activeOverlayFilters.size === 0) return []
+    const configs = []
+    for (const key of activeOverlayFilters) {
+      const mapped = OVERLAY_FIELD_MAP[key]
+      if (mapped) configs.push({ ...mapped, key })
+    }
+    return configs
+  }, [activeOverlayFilters])
 
   const updateLineDraft = (nextValue) => {
     if (!isLineType) return
@@ -1339,8 +1364,8 @@ export default memo(function ChartArea({
     } else {
       bars = buildOneXTwoBars(recentMatches?.home || [])
     }
-    return enrichWithOverlay(bars, overlayConfig)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfig])
+    return enrichWithOverlays(bars, overlayConfigs)
+  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
 
   const awayData = useMemo(() => {
     let bars
@@ -1359,8 +1384,8 @@ export default memo(function ChartArea({
     } else {
       bars = buildOneXTwoBars(recentMatches?.away || [])
     }
-    return enrichWithOverlay(bars, overlayConfig)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfig])
+    return enrichWithOverlays(bars, overlayConfigs)
+  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
 
   // Compute season averages from unfiltered data (constant across filter changes)
   const homeSeasonAvg = useMemo(() => {
@@ -1406,7 +1431,7 @@ export default memo(function ChartArea({
             onReferenceLineDragChange={updateLineDraft}
             onReferenceLineDragCommit={commitLine}
             layoutVersion={layoutVersion}
-            overlayConfig={overlayConfig}
+            overlayConfigs={overlayConfigs}
             opponentRankOverride={opponentRanks?.home_team || null}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}
@@ -1424,7 +1449,7 @@ export default memo(function ChartArea({
             onReferenceLineDragChange={updateLineDraft}
             onReferenceLineDragCommit={commitLine}
             layoutVersion={layoutVersion}
-            overlayConfig={overlayConfig}
+            overlayConfigs={overlayConfigs}
             opponentRankOverride={opponentRanks?.away_team || null}
             isFiltersOpen={isFiltersOpen}
             onToggleFilters={onToggleFilters}

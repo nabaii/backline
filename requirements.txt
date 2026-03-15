@@ -6,3 +6,5 @@ scikit-learn==1.8.0
 numpy>=1.26.0
 openai>=1.30.0
 ddgs>=6.0.0
+pymongo[srv]>=4.6.0
+python-dotenv>=1.0.0

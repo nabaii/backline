@@ -16,6 +16,7 @@ const RANGE_CONFIGS = {
   opposition_goals_range: { label: 'Opp Goals', min: 0, max: 10, step: 1, precision: 0 },
   team_xg_range: { label: 'xG', min: 0, max: 5, step: 0.1, precision: 1 },
   opposition_xg_range: { label: 'Opp xG', min: 0, max: 5, step: 0.1, precision: 1 },
+  total_xg_range: { label: 'Total xG', min: 0, max: 10, step: 0.1, precision: 1 },
   team_possession_range: { label: 'Possession', min: 0, max: 100, step: 1, precision: 0 },
   opposition_possession_range: { label: 'Opp Poss', min: 0, max: 100, step: 1, precision: 0 },
   field_tilt_range: { label: 'Field Tilt', min: 0, max: 1, step: 0.01, precision: 2 },
@@ -39,6 +40,7 @@ const STATS_FILTER_KEYS = [
   'opposition_goals_range',
   'team_xg_range',
   'opposition_xg_range',
+  'total_xg_range',
   'team_possession_range',
   'opposition_possession_range',
   'field_tilt_range',
@@ -152,8 +154,8 @@ export default memo(function FilterDropdown({
   hasPendingChanges,
   splitView = VIEW_BOTH,
   onSplitViewChange,
-  activeOverlayFilter,
-  onOverlayFilterChange,
+  activeOverlayFilters,
+  onOverlayFiltersChange,
   homeTeamName,
   awayTeamName,
 }) {
@@ -205,14 +207,18 @@ export default memo(function FilterDropdown({
       Object.prototype.hasOwnProperty.call(RANGE_CONFIGS, key)
       || Object.prototype.hasOwnProperty.call(OPPONENT_RANKING_RANGE_CONFIGS, key)
     )
-    if (typeof onOverlayFilterChange === 'function' && isOverlayCandidate) {
-      if (activeOverlayFilter === key) {
-        onOverlayFilterChange(null)
-      } else {
-        onOverlayFilterChange(key)
-      }
+    if (typeof onOverlayFiltersChange === 'function' && isOverlayCandidate) {
+      onOverlayFiltersChange(prev => {
+        const next = new Set(prev)
+        if (next.has(key)) {
+          next.delete(key)
+        } else {
+          next.add(key)
+        }
+        return next
+      })
     }
-  }, [activeOverlayFilter, onOverlayFilterChange])
+  }, [onOverlayFiltersChange])
 
   const updateDraft = (key, nextRange) => {
     setDrafts(prev => ({ ...prev, [key]: nextRange }))
@@ -416,7 +422,7 @@ export default memo(function FilterDropdown({
               if (!config) return null
               const isExpanded = expandedFilters.has(key)
               const isModified = isRangeModified(value[key], config)
-              const isOverlay = activeOverlayFilter === key
+              const isOverlay = activeOverlayFilters?.has(key)
               let cls = 'filter-pill-btn'
               if (isExpanded || isOverlay) cls += ' active'
               if (isModified) cls += ' modified'
@@ -509,7 +515,7 @@ export default memo(function FilterDropdown({
                 if (!config) return null
                 const isExpanded = expandedFilters.has(key)
                 const isModified = isRangeModified(value[key], config)
-                const isOverlay = activeOverlayFilter === key
+                const isOverlay = activeOverlayFilters?.has(key)
                 let className = 'filter-pill-btn'
                 if (isExpanded || isOverlay) className += ' active'
                 if (isModified) className += ' modified'

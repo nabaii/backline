@@ -40,7 +40,14 @@
       "Bash(ls -la --time-style=long-iso \"c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues\"/*/season_df.csv)",
       "Bash(python -u data/raw/scrape_data.py --mode multi-league-scrape --leagues \"England Premier League\" \"France Ligue 1\" \"Germany Bundesliga\" \"Italy Serie A\" \"Spain La Liga\")",
       "Bash(find /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src -type f \\\\\\(-name *.tsx -o -name *.ts -o -name *.jsx -o -name *.js \\\\\\))",
-      "Bash(python -c \"import sys; sys.path.insert\\(0, ''''backend''''\\); from backend_api import create_app; app = create_app\\(\\); print\\(''''App created successfully''''\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0, ''''backend''''\\); from backend_api import create_app; app = create_app\\(\\); print\\(''''App created successfully''''\\)\")",
+      "Bash(ls -d c:/Users/enaic/OneDrive/Desktop/backline/backline_v2/backend/bet_type/*/)",
+      "Bash(npx react-scripts:*)",
+      "Bash(npx eslint:*)",
+      "Bash(wc -l /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/*/season_df.csv)",
+      "Bash(wc -l /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/*/league_table.csv)",
+      "Bash(python -c \"from backend.db import get_collection; col = get_collection\\(''season_matches''\\); print\\(''MongoDB:'', ''connected'' if col else ''unavailable \\(will use CSV fallback\\)''\\)\")",
+      "Bash(python scripts/migrate_to_mongodb.py)"
     ]
   }
 }

@@ -26,6 +26,7 @@ from backend.filters.filters import (
     TeamXG,
     OpponentXG,
     TotalMatchGoals,
+    TotalXG,
 )
 
 class OverUnderWorkspace(BetTypeWorkspace):
@@ -64,6 +65,7 @@ class OverUnderWorkspace(BetTypeWorkspace):
             GoalsConceded,
             TeamXG,
             OpponentXG,
+            TotalXG,
         ]
     
     @property

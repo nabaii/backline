@@ -280,6 +280,12 @@ class AnalyticsStore(AnalyticsStoreContract):
                 return df["expected_goals_home"].where(df["venue"] == "home", df["expected_goals_away"])
             return df["expected_goals_away"].where(df["venue"] == "home", df["expected_goals_home"])
 
+        if spec.key == "total_xg":
+            required = {"expected_goals_home", "expected_goals_away"}
+            if not required.issubset(df.columns):
+                return None
+            return df["expected_goals_home"] + df["expected_goals_away"]
+
         if spec.key in {"team_possession", "opponent_possession"}:
             required = {"venue", "ball_possession_home", "ball_possession_away"}
             if not required.issubset(df.columns):

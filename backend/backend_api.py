@@ -47,9 +47,11 @@ from backend.filters.filters import (
     TeamMomentumFilter,
     TeamXG,
     TotalMatchGoals,
+    TotalXG,
     VenueFilter,
 )
 from backend.store.analytics_store import AnalyticsStore
+from backend.db import get_collection
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -879,36 +881,50 @@ def _extract_penalty_goals(series: pd.Series) -> pd.Series:
     return series.map(_parse_one, na_action="ignore").fillna(0).astype(int)
 
 def _load_raw_df() -> pd.DataFrame:
-    """Load and concatenate season data from all league directories.
+    """Load and concatenate season data from MongoDB or local CSV files.
 
+    Tries MongoDB first (via MONGODB_URI), falls back to local CSV files.
     Results are cached in memory and refreshed every _RAW_DF_TTL seconds.
     """
     now = monotonic()
     if _raw_df_cache["df"] is not None and (now - _raw_df_cache["ts"]) < _RAW_DF_TTL:
         return _raw_df_cache["df"]
 
-    frames: list[pd.DataFrame] = []
+    raw_df = None
 
-    if LEAGUES_DIR.exists():
-        for league_dir in sorted(LEAGUES_DIR.iterdir()):
-            csv_path = league_dir / "season_df.csv"
-            if csv_path.exists():
-                df = pd.read_csv(csv_path)
-                df["league_slug"] = league_dir.name
-                frames.append(df)
+    # Try MongoDB first
+    col = get_collection("season_matches")
+    if col is not None:
+        try:
+            docs = list(col.find({}, {"_id": 0}))
+            if docs:
+                raw_df = pd.DataFrame(docs)
+        except Exception:
+            raw_df = None
 
-    # Fallback: try legacy single-file path if no league folders found
-    if not frames:
-        data_path = PRIMARY_SEASON_DATA_PATH if PRIMARY_SEASON_DATA_PATH.exists() else LEGACY_SEASON_DATA_PATH
-        if not data_path.exists():
-            raise FileNotFoundError(
-                f"No league data found in {LEAGUES_DIR} and no fallback at {PRIMARY_SEASON_DATA_PATH}"
-            )
-        df = pd.read_csv(data_path)
-        df["league_slug"] = "england_premier_league"
-        frames.append(df)
+    # Fallback to local CSV files
+    if raw_df is None:
+        frames: list[pd.DataFrame] = []
 
-    raw_df = pd.concat(frames, ignore_index=True)
+        if LEAGUES_DIR.exists():
+            for league_dir in sorted(LEAGUES_DIR.iterdir()):
+                csv_path = league_dir / "season_df.csv"
+                if csv_path.exists():
+                    df = pd.read_csv(csv_path)
+                    df["league_slug"] = league_dir.name
+                    frames.append(df)
+
+        if not frames:
+            data_path = PRIMARY_SEASON_DATA_PATH if PRIMARY_SEASON_DATA_PATH.exists() else LEGACY_SEASON_DATA_PATH
+            if not data_path.exists():
+                raise FileNotFoundError(
+                    f"No league data found in {LEAGUES_DIR} and no fallback at {PRIMARY_SEASON_DATA_PATH}"
+                )
+            df = pd.read_csv(data_path)
+            df["league_slug"] = "england_premier_league"
+            frames.append(df)
+
+        raw_df = pd.concat(frames, ignore_index=True)
     if "match_id" not in raw_df.columns and "game_id" in raw_df.columns:
         raw_df = raw_df.rename(columns={"game_id": "match_id"})
 
@@ -1435,6 +1451,9 @@ def _default_evidence_filters(filters_payload: dict[str, Any]) -> list[FilterSpe
     opposition_xg_range = _normalize_range(filters_payload.get("opposition_xg_range"), default_low=0.0, default_high=5.0)
     specs.append(OpponentXG.build(operator="between", value=opposition_xg_range))
 
+    total_xg_range = _normalize_range(filters_payload.get("total_xg_range"), default_low=0.0, default_high=10.0)
+    specs.append(TotalXG.build(operator="between", value=total_xg_range))
+
     team_possession_range = _normalize_range(
         filters_payload.get("team_possession_range"),
         default_low=0.0,
@@ -1481,6 +1500,20 @@ def _parse_filters(payload: dict[str, Any]) -> list[FilterSpec]:
 def _load_league_table(league_id: str) -> pd.DataFrame:
     if not league_id:
         return pd.DataFrame()
+
+    # Try MongoDB first
+    col = get_collection("league_tables")
+    if col is not None:
+        try:
+            docs = list(col.find({"league_slug": str(league_id)}, {"_id": 0}))
+            if docs:
+                table_df = pd.DataFrame(docs)
+                if not table_df.empty and "team" in table_df.columns:
+                    return table_df
+        except Exception:
+            pass
+
+    # Fallback to local CSV
     table_path = LEAGUES_DIR / str(league_id) / "league_table.csv"
     if not table_path.exists():
         return pd.DataFrame()
@@ -2112,6 +2145,27 @@ def _coerce_numeric_series(df: pd.DataFrame, column_candidates: list[str]) -> pd
 
 @lru_cache(maxsize=1)
 def _corner_total_override_by_match_id() -> dict[int, float]:
+    # Try MongoDB first
+    col = get_collection("corner_overrides")
+    if col is not None:
+        try:
+            docs = list(col.find({}, {"_id": 0}))
+            if docs:
+                overrides_df = pd.DataFrame(docs)
+                if not overrides_df.empty:
+                    match_id_col = "match_id" if "match_id" in overrides_df.columns else None
+                    total_col = "total_corners" if "total_corners" in overrides_df.columns else None
+                    if match_id_col and total_col:
+                        match_ids = pd.to_numeric(overrides_df[match_id_col], errors="coerce")
+                        totals = pd.to_numeric(overrides_df[total_col], errors="coerce")
+                        cleaned = pd.DataFrame({"match_id": match_ids, "total_corners": totals}).dropna(subset=["match_id", "total_corners"])
+                        if not cleaned.empty:
+                            cleaned["match_id"] = cleaned["match_id"].astype(int)
+                            return dict(zip(cleaned["match_id"].astype(int), cleaned["total_corners"].astype(float)))
+        except Exception:
+            pass
+
+    # Fallback to local CSV
     if not CORNER_OVERRIDES_PATH.exists():
         return {}
 
@@ -2294,6 +2348,8 @@ def _build_overlay_metrics_from_row(
     if total_goals is None and team_goals is not None and opponent_goals is not None:
         total_goals = round(team_goals + opponent_goals, 2)
 
+    total_xg = round(team_xg + opponent_xg, 4) if team_xg is not None and opponent_xg is not None else None
+
     overlay_payload: dict[str, Any] = {
         "team_momentum_range": team_momentum,
         "opponent_momentum_range": opponent_momentum,
@@ -2302,6 +2358,7 @@ def _build_overlay_metrics_from_row(
         "opposition_goals_range": opponent_goals,
         "team_xg": team_xg,
         "opponent_xg": opponent_xg,
+        "total_xg": total_xg,
         "team_xg_range": team_xg,
         "opposition_xg_range": opponent_xg,
         "team_possession_range": team_possession,

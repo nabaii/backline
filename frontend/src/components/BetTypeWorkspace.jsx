@@ -47,6 +47,7 @@ function createDefaultFilters() {
     opposition_goals_range: [0, 10],
     team_xg_range: [0, 5],
     opposition_xg_range: [0, 5],
+    total_xg_range: [0, 10],
     team_possession_range: [0, 100],
     opposition_possession_range: [0, 100],
     field_tilt_range: [0, 1],
@@ -176,6 +177,18 @@ function buildEvidenceFilters(filters) {
       value: filters.opposition_xg_range,
       display_name: 'Opposition xG',
       required_columns: ['expected_goals_home', 'expected_goals_away', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.total_xg_range) && filters.total_xg_range.length === 2) {
+    evidenceFilters.push({
+      key: 'total_xg',
+      kind: 'column',
+      field: 'total_xg',
+      operator: 'between',
+      value: filters.total_xg_range,
+      display_name: 'Total xG',
+      required_columns: ['expected_goals_home', 'expected_goals_away'],
     })
   }
 
@@ -311,7 +324,7 @@ export default function BetTypeWorkspace({
   const [chartTeamView, setChartTeamView] = useState(DEFAULT_CHART_TEAM_VIEW)
   const [isFiltersOpen, setIsFiltersOpen] = useState(false)
   const [showGlossary, setShowGlossary] = useState(false)
-  const [activeOverlayFilter, setActiveOverlayFilter] = useState(null)
+  const [activeOverlayFilters, setActiveOverlayFilters] = useState(() => new Set())
   const [error, setError] = useState(null)
   const workspaceCacheRef = useRef(new Map())
   const seasonMatchesRef = useRef({})
@@ -515,7 +528,7 @@ export default function BetTypeWorkspace({
               teamView={chartTeamView}
               isFiltersOpen={isFiltersOpen}
               onToggleFilters={() => setIsFiltersOpen(current => !current)}
-              activeOverlayFilter={activeOverlayFilter}
+              activeOverlayFilters={activeOverlayFilters}
               opponentRanks={workspace?.opponent_ranks || null}
             />
             <div className="metrics-panel-desktop-wrap">
@@ -553,8 +566,8 @@ export default function BetTypeWorkspace({
                 hasPendingChanges={hasPendingFilterChanges}
                 splitView={chartTeamView}
                 onSplitViewChange={setChartTeamView}
-                activeOverlayFilter={activeOverlayFilter}
-                onOverlayFilterChange={setActiveOverlayFilter}
+                activeOverlayFilters={activeOverlayFilters}
+                onOverlayFiltersChange={setActiveOverlayFilters}
                 homeTeamName={homeTeamName}
                 awayTeamName={awayTeamName}
               />

@@ -20,6 +20,7 @@ from backend.filters.filters import (
     TeamShotXGFilter,
     TeamXG,
     TotalMatchGoals,
+    TotalXG,
     VenueFilter,
     XGDifferenceFilter,
 )
@@ -59,6 +60,7 @@ class CornerWorkspace(CornersWorkspaceContract):
             GoalsScored,
             GoalsConceded,
             TotalMatchGoals,
+            TotalXG,
         ]
 
     @property

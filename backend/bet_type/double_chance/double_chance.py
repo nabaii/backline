@@ -24,6 +24,7 @@ from backend.filters.filters import (
     GoalsScored,
     GoalsConceded,
     TotalMatchGoals,
+    TotalXG,
 )
 
 class DoubleChanceWorkspace(BetTypeWorkspace):
@@ -53,6 +54,7 @@ class DoubleChanceWorkspace(BetTypeWorkspace):
             GoalsScored,
             GoalsConceded,
             TotalMatchGoals,
+            TotalXG,
         ]
     
     @property

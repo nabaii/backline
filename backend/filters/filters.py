@@ -416,6 +416,39 @@ class OpponentXG(BaseFilter):
         return spec
 
 
+class TotalXG(BaseFilter):
+    key = 'total_xg'
+    display_name = 'Total Expected Goals'
+    required_columns = ('expected_goals_home', 'expected_goals_away')
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        operator: Literal['>=', '<=', '>', '<', '==', 'between'],
+        value: Any,
+        perspective: Optional[Literal['home', 'away']] = None,
+    ) -> FilterSpec:
+        if operator == "between":
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError("TotalXG 'between' requires (min, max)")
+            low, high = value
+            value = (min(low, high), max(low, high))
+
+        spec = FilterSpec(
+            key=cls.key,
+            kind='column',
+            field="total_xg",
+            operator=operator,
+            value=value,
+            perspective=perspective,
+            display_name=cls.display_name,
+            required_columns=cls.required_columns,
+        )
+        spec.validate()
+        return spec
+
+
 class TeamPossessionFilter(BaseFilter):
     key = "team_possession"
     display_name = "Team Possession"

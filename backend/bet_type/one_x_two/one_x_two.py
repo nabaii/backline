@@ -24,6 +24,7 @@ from backend.filters.filters import (
     GoalsScored,
     GoalsConceded,
     TotalMatchGoals,
+    TotalXG,
 )
 
 
@@ -71,6 +72,7 @@ class OneXTwoWorkspace(BetTypeWorkspace):
             GoalsScored,
             GoalsConceded,
             TotalMatchGoals,
+            TotalXG,
         ]
     
     @property
