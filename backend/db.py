@@ -27,8 +27,9 @@ def _get_client():
         uri = os.environ.get("MONGODB_URI")
         if not uri:
             return None
+        import certifi
         from pymongo import MongoClient
-        _client = MongoClient(uri)
+        _client = MongoClient(uri, tlsCAFile=certifi.where())
     return _client
 
 

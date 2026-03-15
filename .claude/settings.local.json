@@ -47,7 +47,10 @@
       "Bash(wc -l /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/*/season_df.csv)",
       "Bash(wc -l /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/data/raw/leagues/*/league_table.csv)",
       "Bash(python -c \"from backend.db import get_collection; col = get_collection\\(''season_matches''\\); print\\(''MongoDB:'', ''connected'' if col else ''unavailable \\(will use CSV fallback\\)''\\)\")",
-      "Bash(python scripts/migrate_to_mongodb.py)"
+      "Bash(python scripts/migrate_to_mongodb.py)",
+      "Bash(python -c \"import ssl; print\\(ssl.OPENSSL_VERSION\\)\")",
+      "Bash(python -c \"from dotenv import load_dotenv; load_dotenv\\(override=True\\); import os; uri=os.environ.get\\(''MONGODB_URI'',''''\\); print\\(uri[:30]+''...'' if len\\(uri\\)>30 else uri\\); print\\(''Has tlsAllowInvalidCertificates:'', ''tlsAllow'' in uri\\); print\\(''Has certifi:'', ''certifi'' in uri\\)\")",
+      "Bash(python -c \"import certifi; print\\(certifi.where\\(\\)\\)\")"
     ]
   }
 }

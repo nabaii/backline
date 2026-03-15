@@ -781,5 +781,13 @@ def main():
     print("=" * 60)
 
 
+    print("\n  [*] Syncing updated data to MongoDB Atlas ...")
+    try:
+        from scripts.migrate_to_mongodb import migrate
+        migrate()
+        print("  [OK] MongoDB sync complete.")
+    except Exception as e:
+        print(f"  [!!] MongoDB sync failed: {e}")
+
 if __name__ == "__main__":
     main()

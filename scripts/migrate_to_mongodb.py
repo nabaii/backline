@@ -19,6 +19,7 @@ import os
 import sys
 from pathlib import Path
 
+import certifi
 import pandas as pd
 from pymongo import MongoClient
 
@@ -41,10 +42,9 @@ def _clean_for_mongo(df: pd.DataFrame) -> list[dict]:
 def migrate():
     uri = os.environ.get("MONGODB_URI")
     if not uri:
-        print("ERROR: Set MONGODB_URI environment variable first.")
-        sys.exit(1)
+        raise ValueError("MONGODB_URI environment variable is not set. Cannot sync to MongoDB.")
 
-    client = MongoClient(uri)
+    client = MongoClient(uri, tlsCAFile=certifi.where())
     db = client.get_default_database("backline")
 
     # ── Season matches ──
