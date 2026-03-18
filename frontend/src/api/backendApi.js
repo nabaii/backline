@@ -428,6 +428,64 @@ export async function getWorkspaceCorners({
   })
 }
 
+export async function getWorkspaceHomeCorners({
+  match_id,
+  home_team_id,
+  away_team_id,
+  home_team_name = '',
+  away_team_name = '',
+  league_id = '',
+  line = 4.5,
+  limit = 0,
+  filters = {},
+  evidenceFilters = [],
+}) {
+  return requestJson('/api/workspace/home_corners', {
+    method: 'POST',
+    body: JSON.stringify({
+      match_id,
+      home_team_id,
+      away_team_id,
+      home_team_name,
+      away_team_name,
+      league_id,
+      line,
+      limit,
+      filters,
+      evidenceFilters,
+    }),
+  })
+}
+
+export async function getWorkspaceAwayCorners({
+  match_id,
+  home_team_id,
+  away_team_id,
+  home_team_name = '',
+  away_team_name = '',
+  league_id = '',
+  line = 4.5,
+  limit = 0,
+  filters = {},
+  evidenceFilters = [],
+}) {
+  return requestJson('/api/workspace/away_corners', {
+    method: 'POST',
+    body: JSON.stringify({
+      match_id,
+      home_team_id,
+      away_team_id,
+      home_team_name,
+      away_team_name,
+      league_id,
+      line,
+      limit,
+      filters,
+      evidenceFilters,
+    }),
+  })
+}
+
 /**
  * Stream a RAG query response from the backend.
  * @param {object} params - { query, home_team_id, away_team_id, extra_context }
@@ -556,6 +614,8 @@ export default {
   getWorkspaceHomeOu,
   getWorkspaceAwayOu,
   getWorkspaceCorners,
+  getWorkspaceHomeCorners,
+  getWorkspaceAwayCorners,
   ragStream,
   chatStream,
   analyzeBetSlip,

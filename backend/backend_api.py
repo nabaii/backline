@@ -29,7 +29,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 from backend.bet_type.double_chance.double_chance import DoubleChanceWorkspace
-from backend.bet_type.corners.corners import CornerWorkspace
+from backend.bet_type.corners.corners import AwayCornerWorkspace, CornerWorkspace, HomeCornerWorkspace
 from backend.bet_type.over_under.over_under import OverUnderWorkspace
 from backend.bet_type.one_x_two.one_x_two import OneXTwoWorkspace
 from backend.builders.match_analytics_builder import MatchAnalyticsBuilder
@@ -2274,6 +2274,45 @@ def _split_corner_metrics(df: pd.DataFrame, line: float = 8.5) -> dict[str, floa
     }
 
 
+def _resolve_side_corners_series(df: pd.DataFrame, side: str) -> pd.Series:
+    """Resolve a single side's corners series (side = 'home' or 'away')."""
+    cols = [f"{side}_corners", f"corners_{side}", f"corner_kicks_{side}"]
+    return _coerce_numeric_series(df, cols).fillna(0.0)
+
+
+def _split_side_corner_metrics(df: pd.DataFrame, line: float, side: str) -> dict[str, float]:
+    """Compute over/under metrics for a single side's corners."""
+    if df.empty:
+        return {
+            "matches": 0,
+            "avg_corners": 0.0,
+            "min_corners": 0.0,
+            "max_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+    corners = _resolve_side_corners_series(df, side)
+    if corners.empty:
+        return {
+            "matches": 0,
+            "avg_corners": 0.0,
+            "min_corners": 0.0,
+            "max_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+    over = int((corners > line).sum())
+    under = int((corners <= line).sum())
+    return {
+        "matches": int(len(corners)),
+        "avg_corners": round(float(corners.mean()), 2),
+        "min_corners": round(float(corners.min()), 2),
+        "max_corners": round(float(corners.max()), 2),
+        "over": over,
+        "under": under,
+    }
+
+
 @lru_cache(maxsize=1)
 def _match_name_index() -> dict[int, tuple[str, str]]:
     raw_df = _load_raw_df()
@@ -2599,6 +2638,58 @@ def _build_recent_matches_corners(
                 "total_corners": total_corners,
                 "corners_over_under_result": "O" if total_corners > line else "U",
                                 "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_side_corners(
+    df: pd.DataFrame,
+    line: float,
+    side: str,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build recent-match records for a single side's corners (home or away)."""
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        side_corners = 0.0
+        for col in (f"{side}_corners", f"corners_{side}", f"corner_kicks_{side}"):
+            val = pd.to_numeric(row.get(col), errors="coerce")
+            if pd.notna(val):
+                side_corners = float(val)
+                break
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "side_corners": side_corners,
+                "corners_over_under_result": "O" if side_corners > line else "U",
+                "goals_scored": goals_scored,
                 "opponent_goals": opponent_goals,
                 **_build_overlay_metrics_from_row(
                     row,
@@ -5692,6 +5783,151 @@ def create_app() -> Flask:
             "notes": notes,
         }
         return jsonify(response)
+
+    # ── Home / Away Corners endpoints ──────────────────────────────────────
+
+    def _handle_side_corners(side: str):
+        """Shared handler for home_corners and away_corners workspaces.
+
+        Like home_ou / away_ou, only queries the relevant team's history.
+        """
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        line = _safe_float(payload.get("line"), 4.5)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        bet_type = f"{side}_corners"
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}", f"line={line}"]
+
+        WorkspaceClass = HomeCornerWorkspace if side == "home" else AwayCornerWorkspace
+
+        # Only query the relevant team (home_corners → home team, away_corners → away team)
+        team_df = pd.DataFrame()
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+
+            if side == "home":
+                team_id, team_name, anchor_side = home_team_id, home_team_name, "home"
+            else:
+                team_id, team_name, anchor_side = away_team_id, away_team_name, "away"
+
+            anchor = _resolve_team_anchor_match(
+                raw_df, team_id, team_name, anchor_side, league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            workspace = WorkspaceClass(store)
+
+            if anchor is not None:
+                anchor_match_id, anchor_perspective = anchor
+                evidence = workspace.get_evidence(
+                    match_id=anchor_match_id,
+                    bet_type=bet_type,
+                    filters=filters,
+                    perspective=anchor_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                team_df = evidence.df
+                notes.append(f"{side}_anchor={anchor_match_id}:{anchor_perspective}")
+            else:
+                notes.append(f"{side}_team_unavailable={team_name or team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        team_df = _sort_team_history(team_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        opponent_team_name = away_team_name if side == "home" else home_team_name
+        team_df = _apply_opponent_rank_filters(
+            team_df, ranking_filters_payload, league_id_for_ranking, notes=notes, side_label=side,
+        )
+        team_df = _apply_similar_teams_filter(
+            team_df, ranking_filters_payload, anchor_opponent_team_name=opponent_team_name, notes=notes, side_label=side,
+        )
+
+        team_metrics = _split_side_corner_metrics(team_df, line, side)
+        empty_metrics = {"matches": 0, "avg_corners": 0.0, "min_corners": 0.0, "max_corners": 0.0, "over": 0, "under": 0}
+
+        team_sample_size = int(len(team_df))
+        opponent_ranks = _build_opponent_rank_payload(league_id_for_ranking, home_team_name, away_team_name)
+
+        if side == "home":
+            home_metrics, away_metrics = team_metrics, empty_metrics
+            home_sample_size, away_sample_size = team_sample_size, 0
+            recent_home = _build_recent_matches_side_corners(team_df, line, side, league_id=league_id_for_ranking)
+            recent_away: list = []
+        else:
+            home_metrics, away_metrics = empty_metrics, team_metrics
+            home_sample_size, away_sample_size = 0, team_sample_size
+            recent_home: list = []
+            recent_away = _build_recent_matches_side_corners(team_df, line, side, league_id=league_id_for_ranking)
+
+        response = {
+            "workspace": {
+                "bet_type": bet_type,
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": team_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": [
+                {
+                    "label": "Over",
+                    "home_count": home_metrics["over"],
+                    "away_count": away_metrics["over"],
+                    "total": team_metrics["over"],
+                },
+                {
+                    "label": "Under",
+                    "home_count": home_metrics["under"],
+                    "away_count": away_metrics["under"],
+                    "total": team_metrics["under"],
+                },
+            ],
+            "recent_matches": {
+                "home": recent_home,
+                "away": recent_away,
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        return jsonify(response)
+
+    @app.route("/api/workspace/home_corners", methods=["POST", "OPTIONS"])
+    def get_workspace_home_corners():
+        if request.method == "OPTIONS":
+            return ("", 204)
+        return _handle_side_corners("home")
+
+    @app.route("/api/workspace/away_corners", methods=["POST", "OPTIONS"])
+    def get_workspace_away_corners():
+        if request.method == "OPTIONS":
+            return ("", 204)
+        return _handle_side_corners("away")
 
     # ── Chat endpoint (intent → workspace → explain) ────────────────────────
     _chat_orchestrator: Any = None

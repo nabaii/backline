@@ -6,6 +6,8 @@ const BET_TYPE_AWAY_OU = 'away_ou'
 const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
 const BET_TYPE_BTTS = 'btts'
 const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_HOME_CORNERS = 'home_corners'
+const BET_TYPE_AWAY_CORNERS = 'away_corners'
 const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
 const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
 
@@ -28,7 +30,27 @@ function renderSampleSize(sampleSize, sampleSizes) {
   return String(sampleSize ?? 0)
 }
 
-function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts, isWeh, isWbh, isCorners }) {
+function TeamMetricsBlock({ title, metrics, isOverUnder, isDoubleChance, isBtts, isWeh, isWbh, isCorners, isSideCorners, sideLabel }) {
+  if (isSideCorners) {
+    const over = Number(metrics?.over ?? 0)
+    const under = Number(metrics?.under ?? 0)
+    const total = over + under
+    const percent = total > 0 ? Math.round((over / total) * 100) : 0
+    const hitRateLabel = `${over}/${total} (${percent}%)`
+    const hitRateToneClass = percent > 50 ? 'metrics-hit-rate--positive' : percent < 50 ? 'metrics-hit-rate--negative' : ''
+    return (
+      <div>
+        <strong>{title}</strong>
+        <div>Hit Rate: <span className={`metrics-hit-rate ${hitRateToneClass}`}>{hitRateLabel}</span></div>
+        <div>Over: {over}</div>
+        <div>Under: {under}</div>
+        <div>Avg {sideLabel} Corners: {Number(metrics?.avg_corners ?? 0).toFixed(2)}</div>
+        <div>Min {sideLabel} Corners: {Number(metrics?.min_corners ?? 0).toFixed(2)}</div>
+        <div>Max {sideLabel} Corners: {Number(metrics?.max_corners ?? 0).toFixed(2)}</div>
+      </div>
+    )
+  }
+
   if (isCorners) {
     const over = Number(metrics?.over ?? 0)
     const under = Number(metrics?.under ?? 0)
@@ -137,6 +159,8 @@ export default memo(function MetricsPanel({ betType = '1X2', metrics, sampleSize
   const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
   const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
   const isCorners = normalizedBetType === BET_TYPE_CORNERS
+  const isSideCorners = normalizedBetType === BET_TYPE_HOME_CORNERS || normalizedBetType === BET_TYPE_AWAY_CORNERS
+  const sideLabel = normalizedBetType === BET_TYPE_HOME_CORNERS ? 'Home' : normalizedBetType === BET_TYPE_AWAY_CORNERS ? 'Away' : ''
 
   return (
     <aside className="metrics-panel">
@@ -152,6 +176,8 @@ export default memo(function MetricsPanel({ betType = '1X2', metrics, sampleSize
           isWeh={isWeh}
           isWbh={isWbh}
           isCorners={isCorners}
+          isSideCorners={isSideCorners}
+          sideLabel={sideLabel}
         />
         <TeamMetricsBlock
           title="Away"
@@ -162,6 +188,8 @@ export default memo(function MetricsPanel({ betType = '1X2', metrics, sampleSize
           isWeh={isWeh}
           isWbh={isWbh}
           isCorners={isCorners}
+          isSideCorners={isSideCorners}
+          sideLabel={sideLabel}
         />
       </div>
     </aside>

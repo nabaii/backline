@@ -20,6 +20,8 @@ const BET_TYPE_BTTS_OU = 'btts_ou'
 const BET_TYPE_FIRST_HALF_OU = 'first_half_ou'
 const BET_TYPE_FIRST_HALF_1X2 = 'first_half_1x2'
 const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_HOME_CORNERS = 'home_corners'
+const BET_TYPE_AWAY_CORNERS = 'away_corners'
 const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
 const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
 const VIEW_BOTH = 'both'
@@ -103,7 +105,10 @@ function isOverUnderFamilyBetType(betType) {
 }
 
 function isCornersBetType(betType) {
-  return String(betType).toLowerCase() === BET_TYPE_CORNERS
+  const normalized = String(betType).toLowerCase()
+  return normalized === BET_TYPE_CORNERS
+    || normalized === BET_TYPE_HOME_CORNERS
+    || normalized === BET_TYPE_AWAY_CORNERS
 }
 
 function extractMatchDate(rawMatch = {}) {
@@ -369,6 +374,32 @@ function buildCornerBars(matches = [], line = 8.5) {
       ...buildBaseMatchFields(m, fallbackOpponent),
     }
   })
+}
+
+function buildSideCornerBars(matches = [], line = 4.5) {
+  return matches.map((m, idx) => {
+    const sideCorners = Number(m.side_corners ?? 0)
+    const safeCorners = Number.isFinite(sideCorners) ? sideCorners : 0
+    const fallbackOpponent = `Opponent ${m.opponent_id ?? idx + 1}`
+    const label = m.chart_label || (m.venue === 'away' ? `@ ${m.opponent_name || fallbackOpponent}` : `vs ${m.opponent_name || fallbackOpponent}`)
+    const result = safeCorners > line ? 'O' : 'U'
+    return {
+      label,
+      value: safeCorners,
+      side_corners: safeCorners,
+      color: result === 'O' ? '#2ecc71' : '#e74c3c',
+      corners_over_under_result: result,
+      goals_scored: m.goals_scored,
+      opponent_goals: m.opponent_goals,
+      match_id: m.match_id,
+      ...buildBaseMatchFields(m, fallbackOpponent),
+    }
+  })
+}
+
+function isSideCornersBetType(betType) {
+  const normalized = String(betType).toLowerCase()
+  return normalized === BET_TYPE_HOME_CORNERS || normalized === BET_TYPE_AWAY_CORNERS
 }
 
 function formatScoreline(row) {
@@ -680,9 +711,11 @@ function computeGraphAvg(rows, betType) {
   let sum = 0
   let count = 0
   for (const row of rows) {
-    const value = isCornersBetType(normalizedBetType)
-      ? getTotalCornersValue(row)
-      : Number(row?.value)
+    const value = isSideCornersBetType(normalizedBetType)
+      ? Number(row?.side_corners ?? row?.value ?? 0)
+      : isCornersBetType(normalizedBetType)
+        ? getTotalCornersValue(row)
+        : Number(row?.value)
     if (Number.isFinite(value)) {
       sum += value
       count++
@@ -706,6 +739,8 @@ function computeSeasonAvg(rows, betType) {
           ? (row.team_goals ?? row._raw?.goals_scored)
           : (row.total_goals ?? row._raw?.total_goals)
       )
+    } else if (isSideCornersBetType(normalizedBetType)) {
+      value = Number(row.side_corners ?? row.value ?? 0)
     } else if (isCornersBetType(normalizedBetType)) {
       value = getTotalCornersValue(row)
     } else {
@@ -729,6 +764,12 @@ function getAverageMetricLabel(betType) {
   }
   if (isOverUnderFamilyBetType(normalizedBetType)) {
     return isTeamGoalsMode ? 'Team Goals Avg' : 'Total Goals Avg'
+  }
+  if (normalizedBetType === BET_TYPE_HOME_CORNERS) {
+    return 'Home Corners Avg'
+  }
+  if (normalizedBetType === BET_TYPE_AWAY_CORNERS) {
+    return 'Away Corners Avg'
   }
   if (isCornersBetType(normalizedBetType)) {
     return 'Corners Avg'
@@ -778,6 +819,12 @@ function getLineSummaryLabel(betType, line) {
   }
   if (normalizedBetType === BET_TYPE_AWAY_OU) {
     return `Away Over/Under ${lineText} Team Goals`
+  }
+  if (normalizedBetType === BET_TYPE_HOME_CORNERS) {
+    return `Over/Under ${lineText} Home Corners`
+  }
+  if (normalizedBetType === BET_TYPE_AWAY_CORNERS) {
+    return `Over/Under ${lineText} Away Corners`
   }
   if (isCorners) {
     return `Over/Under ${lineText} Total Corners`
@@ -890,6 +937,7 @@ function TeamBarChart({
   const normalizedBetType = String(betType).toLowerCase()
   const isOverUnder = isOverUnderFamilyBetType(normalizedBetType)
   const isCorners = isCornersBetType(normalizedBetType)
+  const isSideCorners = isSideCornersBetType(normalizedBetType)
   const isLineType = isOverUnder || isCorners
   const isOneXTwoOu = normalizedBetType === BET_TYPE_ONE_X_TWO_OU
   const isDoubleChanceOu = normalizedBetType === BET_TYPE_DOUBLE_CHANCE_OU
@@ -1150,6 +1198,11 @@ function TeamBarChart({
                   if (isOverUnder) {
                     return [Number(val).toFixed(1), metricName || 'Goals']
                   }
+                  if (isSideCorners) {
+                    const sc = Number(item?.payload?.side_corners ?? val)
+                    const label = normalizedBetType === BET_TYPE_HOME_CORNERS ? 'Home Corners' : 'Away Corners'
+                    return [Number.isFinite(sc) ? sc.toFixed(1) : '0.0', label]
+                  }
                   if (isCorners) {
                     const totalCorners = getTotalCornersValue(item?.payload || {})
                     return [Number(totalCorners).toFixed(1), 'Total Corners']
@@ -1347,9 +1400,13 @@ export default memo(function ChartArea({
     commitLine(next)
   }
 
+  const isSideCorners = isSideCornersBetType(normalizedBetType)
+
   const homeData = useMemo(() => {
     let bars
-    if (isCorners) {
+    if (isSideCorners) {
+      bars = buildSideCornerBars(recentMatches?.home || [], line)
+    } else if (isCorners) {
       bars = buildCornerBars(recentMatches?.home || [], line)
     } else if (isOverUnder) {
       bars = buildOverUnderBars(recentMatches?.home || [], line, normalizedBetType)
@@ -1365,11 +1422,13 @@ export default memo(function ChartArea({
       bars = buildOneXTwoBars(recentMatches?.home || [])
     }
     return enrichWithOverlays(bars, overlayConfigs)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
+  }, [recentMatches, isCorners, isSideCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
 
   const awayData = useMemo(() => {
     let bars
-    if (isCorners) {
+    if (isSideCorners) {
+      bars = buildSideCornerBars(recentMatches?.away || [], line)
+    } else if (isCorners) {
       bars = buildCornerBars(recentMatches?.away || [], line)
     } else if (isOverUnder) {
       bars = buildOverUnderBars(recentMatches?.away || [], line, normalizedBetType)
@@ -1385,14 +1444,15 @@ export default memo(function ChartArea({
       bars = buildOneXTwoBars(recentMatches?.away || [])
     }
     return enrichWithOverlays(bars, overlayConfigs)
-  }, [recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
+  }, [recentMatches, isCorners, isSideCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType, overlayConfigs])
 
   // Compute season averages from unfiltered data (constant across filter changes)
   const homeSeasonAvg = useMemo(() => {
     const source = allSeasonMatches || recentMatches
     if (!source?.home?.length) return null
     let bars
-    if (isCorners) bars = buildCornerBars(source.home, line)
+    if (isSideCorners) bars = buildSideCornerBars(source.home, line)
+    else if (isCorners) bars = buildCornerBars(source.home, line)
     else if (isOverUnder) bars = buildOverUnderBars(source.home, line, normalizedBetType)
     else if (isBtts) bars = buildBttsBars(source.home)
     else if (isWeh) bars = buildWehBars(source.home)
@@ -1400,13 +1460,14 @@ export default memo(function ChartArea({
     else if (isDoubleChance) bars = buildDoubleChanceBars(source.home)
     else bars = buildOneXTwoBars(source.home)
     return computeSeasonAvg(bars, normalizedBetType)
-  }, [allSeasonMatches, recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
+  }, [allSeasonMatches, recentMatches, isCorners, isSideCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
 
   const awaySeasonAvg = useMemo(() => {
     const source = allSeasonMatches || recentMatches
     if (!source?.away?.length) return null
     let bars
-    if (isCorners) bars = buildCornerBars(source.away, line)
+    if (isSideCorners) bars = buildSideCornerBars(source.away, line)
+    else if (isCorners) bars = buildCornerBars(source.away, line)
     else if (isOverUnder) bars = buildOverUnderBars(source.away, line, normalizedBetType)
     else if (isBtts) bars = buildBttsBars(source.away)
     else if (isWeh) bars = buildWehBars(source.away)
@@ -1414,7 +1475,7 @@ export default memo(function ChartArea({
     else if (isDoubleChance) bars = buildDoubleChanceBars(source.away)
     else bars = buildOneXTwoBars(source.away)
     return computeSeasonAvg(bars, normalizedBetType)
-  }, [allSeasonMatches, recentMatches, isCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
+  }, [allSeasonMatches, recentMatches, isCorners, isSideCorners, isOverUnder, isBtts, isWeh, isWbh, isDoubleChance, line, normalizedBetType])
 
   return (
     <div className="chart-area">

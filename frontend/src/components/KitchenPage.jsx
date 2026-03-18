@@ -70,6 +70,8 @@ export default function KitchenPage() {
     const BET_TYPE_MAP = {
       'over_under': 'over_under',
       'corners': 'corners',
+      'home_corners': 'home_corners',
+      'away_corners': 'away_corners',
       'one_x_two': '1X2',
       '1X2': '1X2',
       'double_chance': 'double_chance',

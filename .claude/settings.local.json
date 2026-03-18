@@ -50,7 +50,11 @@
       "Bash(python scripts/migrate_to_mongodb.py)",
       "Bash(python -c \"import ssl; print\\(ssl.OPENSSL_VERSION\\)\")",
       "Bash(python -c \"from dotenv import load_dotenv; load_dotenv\\(override=True\\); import os; uri=os.environ.get\\(''MONGODB_URI'',''''\\); print\\(uri[:30]+''...'' if len\\(uri\\)>30 else uri\\); print\\(''Has tlsAllowInvalidCertificates:'', ''tlsAllow'' in uri\\); print\\(''Has certifi:'', ''certifi'' in uri\\)\")",
-      "Bash(python -c \"import certifi; print\\(certifi.where\\(\\)\\)\")"
+      "Bash(python -c \"import certifi; print\\(certifi.where\\(\\)\\)\")",
+      "Bash(python -c \"import ssl; print\\(''OpenSSL:'', ssl.OPENSSL_VERSION\\); import certifi; print\\(''certifi:'', certifi.__version__\\); import pymongo; print\\(''pymongo:'', pymongo.version\\)\")",
+      "Bash(python backend/update_data.py)",
+      "Bash(python update_data.py)",
+      "Bash(python -c \"from backend.bet_type.corners.corners import CornerWorkspace, HomeCornerWorkspace, AwayCornerWorkspace; print\\(''OK''\\)\")"
     ]
   }
 }

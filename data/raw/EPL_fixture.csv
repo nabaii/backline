@@ -295,11 +295,11 @@ gameweek,kickoff_time,home_team,away_team,home_team_score,away_team_score,finish
 30,2026-03-14T17:30:00Z,Arsenal,Everton,2,0,True,291,england_premier_league,1,9
 30,2026-03-14T17:30:00Z,Chelsea,Newcastle,0,1,True,294,england_premier_league,7,15
 30,2026-03-14T20:00:00Z,West Ham,Man City,1,1,True,300,england_premier_league,19,13
-30,2026-03-15T14:00:00Z,Crystal Palace,Leeds,,,False,295,england_premier_league,8,11
-30,2026-03-15T14:00:00Z,Man Utd,Aston Villa,,,False,297,england_premier_league,14,2
-30,2026-03-15T14:00:00Z,Nott'm Forest,Fulham,,,False,298,england_premier_league,16,10
-30,2026-03-15T16:30:00Z,Liverpool,Spurs,,,False,296,england_premier_league,12,18
-30,2026-03-16T20:00:00Z,Brentford,Wolves,,,False,292,england_premier_league,5,20
+30,2026-03-15T14:00:00Z,Crystal Palace,Leeds,0,0,True,295,england_premier_league,8,11
+30,2026-03-15T14:00:00Z,Man Utd,Aston Villa,3,1,True,297,england_premier_league,14,2
+30,2026-03-15T14:00:00Z,Nott'm Forest,Fulham,0,0,True,298,england_premier_league,16,10
+30,2026-03-15T16:30:00Z,Liverpool,Spurs,1,1,True,296,england_premier_league,12,18
+30,2026-03-16T20:00:00Z,Brentford,Wolves,2,2,True,292,england_premier_league,5,20
 31,2026-03-20T20:00:00Z,Bournemouth,Man Utd,,,False,302,england_premier_league,4,14
 31,2026-03-21T12:30:00Z,Brighton,Liverpool,,,False,303,england_premier_league,6,12
 31,2026-03-21T15:00:00Z,Fulham,Burnley,,,False,305,england_premier_league,10,3

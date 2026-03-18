@@ -27,6 +27,30 @@ from backend.filters.filters import (
 from backend.metrics.metric_spec import HitRateMetric, MetricSpec, SampleSizeMetric
 
 
+_CORNERS_FILTERS: list[Type[BaseFilter]] = [
+    XGDifferenceFilter,
+    VenueFilter,
+    HeadToHead,
+    TeamMomentumFilter,
+    OpponentMomentumFilter,
+    TeamXG,
+    OpponentXG,
+    TeamPossessionFilter,
+    OpponentPossessionFilter,
+    FieldTiltFilter,
+    TeamShotXGFilter,
+    LastNGames,
+    GoalsScored,
+    GoalsConceded,
+    TotalMatchGoals,
+    TotalXG,
+]
+
+_CORNERS_REQUIRED_FEATURES = [
+    "total_corners", "home_corners", "away_corners", "goals_scored", "opponent_goals",
+]
+
+
 class CornerWorkspace(CornersWorkspaceContract):
     """
     Workspace for total-corners analysis.
@@ -44,24 +68,7 @@ class CornerWorkspace(CornersWorkspaceContract):
 
     @property
     def allowed_filters(self) -> list[Type[BaseFilter]]:
-        return [
-            XGDifferenceFilter,
-            VenueFilter,
-            HeadToHead,
-            TeamMomentumFilter,
-            OpponentMomentumFilter,
-            TeamXG,
-            OpponentXG,
-            TeamPossessionFilter,
-            OpponentPossessionFilter,
-            FieldTiltFilter,
-            TeamShotXGFilter,
-            LastNGames,
-            GoalsScored,
-            GoalsConceded,
-            TotalMatchGoals,
-            TotalXG,
-        ]
+        return _CORNERS_FILTERS
 
     @property
     def available_metrics(self) -> list[MetricSpec]:
@@ -123,7 +130,7 @@ class CornerWorkspace(CornersWorkspaceContract):
             bet_type=self.name,
             perspective=perspective,
             filters=filters,
-            required_features=["total_corners", "home_corners", "away_corners", "goals_scored", "opponent_goals"],
+            required_features=_CORNERS_REQUIRED_FEATURES,
             home_team_id=home_team_id,
             away_team_id=away_team_id,
         )
@@ -152,6 +159,194 @@ class CornerWorkspace(CornersWorkspaceContract):
         if "opponent_id" not in df.columns:
             df["opponent_id"] = df.index
 
+        return EvidenceSubsetImpl(
+            dataframe=df,
+            perspective=evidence.perspective,
+            bet_type=evidence.bet_type,
+            outcome_feature="corners_outcome",
+        )
+
+
+class HomeCornerWorkspace(CornersWorkspaceContract):
+    """
+    Workspace for home-team corners analysis.
+    Analyzes whether the home team's corners go over or under a specified line.
+    """
+
+    DEFAULT_CORNERS_LINE = 4.5
+
+    def __init__(self, store: AnalyticsStoreContract):
+        super().__init__(store)
+
+    @property
+    def name(self) -> str:
+        return "home_corners"
+
+    @property
+    def allowed_filters(self) -> list[Type[BaseFilter]]:
+        return _CORNERS_FILTERS
+
+    @property
+    def available_metrics(self) -> list[MetricSpec]:
+        return [
+            HitRateMetric(
+                key="corners_hit_rate",
+                name="Home Corners Over Hit Rate",
+                description="Proportion of games where home corners exceeded the line",
+                outcome_column="corners_outcome",
+            ),
+            SampleSizeMetric(
+                key="sample_size",
+                name="Sample Size",
+                description="Number of matches in the home corners evidence set",
+            ),
+        ]
+
+    @property
+    def chart_spec(self) -> ChartSpec:
+        return ChartSpec(
+            chart_type="bar",
+            x_axis=AxisSpec(name="opponent_id", label="Opponent", data_column="opponent_id"),
+            y_axis=AxisSpec(name="home_corners", label="Home Corners", data_column="home_corners"),
+            title="Home Corners by Match",
+            description="Bar chart of home-team corners per match",
+        )
+
+    def validate_filters(self, filters: list[FilterSpec]) -> None:
+        allowed_keys = {cls.key for cls in self.allowed_filters}
+        for f in filters:
+            if f.key not in allowed_keys:
+                raise ValueError(f"Filter '{f.key}' is not allowed for {self.name}")
+
+    def get_evidence(
+        self,
+        match_id: str,
+        bet_type: str,
+        filters: list[FilterSpec],
+        perspective: Literal["home", "away"],
+        line: float = None,
+        home_team_id: int = None,
+        away_team_id: int = None,
+    ) -> EvidenceSubsetImpl:
+        self.validate_filters(filters)
+        if line is None:
+            line = self.DEFAULT_CORNERS_LINE
+
+        request = EvidenceRequest(
+            match_id=match_id,
+            bet_type=self.name,
+            perspective=perspective,
+            filters=filters,
+            required_features=_CORNERS_REQUIRED_FEATURES,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        evidence = self.store.query(request)
+        return self._enrich(evidence, line)
+
+    def _enrich(self, evidence: EvidenceSubsetImpl, line: float) -> EvidenceSubsetImpl:
+        df = evidence.df.copy()
+        if "home_corners" in df.columns:
+            df["home_corners"] = df["home_corners"].astype(float)
+        else:
+            df["home_corners"] = 0.0
+        df["corners_outcome"] = (df["home_corners"] > line).astype(int)
+        if "opponent_id" not in df.columns:
+            df["opponent_id"] = df.index
+        return EvidenceSubsetImpl(
+            dataframe=df,
+            perspective=evidence.perspective,
+            bet_type=evidence.bet_type,
+            outcome_feature="corners_outcome",
+        )
+
+
+class AwayCornerWorkspace(CornersWorkspaceContract):
+    """
+    Workspace for away-team corners analysis.
+    Analyzes whether the away team's corners go over or under a specified line.
+    """
+
+    DEFAULT_CORNERS_LINE = 4.5
+
+    def __init__(self, store: AnalyticsStoreContract):
+        super().__init__(store)
+
+    @property
+    def name(self) -> str:
+        return "away_corners"
+
+    @property
+    def allowed_filters(self) -> list[Type[BaseFilter]]:
+        return _CORNERS_FILTERS
+
+    @property
+    def available_metrics(self) -> list[MetricSpec]:
+        return [
+            HitRateMetric(
+                key="corners_hit_rate",
+                name="Away Corners Over Hit Rate",
+                description="Proportion of games where away corners exceeded the line",
+                outcome_column="corners_outcome",
+            ),
+            SampleSizeMetric(
+                key="sample_size",
+                name="Sample Size",
+                description="Number of matches in the away corners evidence set",
+            ),
+        ]
+
+    @property
+    def chart_spec(self) -> ChartSpec:
+        return ChartSpec(
+            chart_type="bar",
+            x_axis=AxisSpec(name="opponent_id", label="Opponent", data_column="opponent_id"),
+            y_axis=AxisSpec(name="away_corners", label="Away Corners", data_column="away_corners"),
+            title="Away Corners by Match",
+            description="Bar chart of away-team corners per match",
+        )
+
+    def validate_filters(self, filters: list[FilterSpec]) -> None:
+        allowed_keys = {cls.key for cls in self.allowed_filters}
+        for f in filters:
+            if f.key not in allowed_keys:
+                raise ValueError(f"Filter '{f.key}' is not allowed for {self.name}")
+
+    def get_evidence(
+        self,
+        match_id: str,
+        bet_type: str,
+        filters: list[FilterSpec],
+        perspective: Literal["home", "away"],
+        line: float = None,
+        home_team_id: int = None,
+        away_team_id: int = None,
+    ) -> EvidenceSubsetImpl:
+        self.validate_filters(filters)
+        if line is None:
+            line = self.DEFAULT_CORNERS_LINE
+
+        request = EvidenceRequest(
+            match_id=match_id,
+            bet_type=self.name,
+            perspective=perspective,
+            filters=filters,
+            required_features=_CORNERS_REQUIRED_FEATURES,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+        )
+        evidence = self.store.query(request)
+        return self._enrich(evidence, line)
+
+    def _enrich(self, evidence: EvidenceSubsetImpl, line: float) -> EvidenceSubsetImpl:
+        df = evidence.df.copy()
+        if "away_corners" in df.columns:
+            df["away_corners"] = df["away_corners"].astype(float)
+        else:
+            df["away_corners"] = 0.0
+        df["corners_outcome"] = (df["away_corners"] > line).astype(int)
+        if "opponent_id" not in df.columns:
+            df["opponent_id"] = df.index
         return EvidenceSubsetImpl(
             dataframe=df,
             perspective=evidence.perspective,
