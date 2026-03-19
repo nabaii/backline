@@ -312,6 +312,8 @@ export default function BetTypeWorkspace({
   awayTeamId,
   homeTeamName,
   awayTeamName,
+  homeTeamShortName,
+  awayTeamShortName,
   leagueId,
   initialBetType,
 }) {
@@ -481,6 +483,7 @@ export default function BetTypeWorkspace({
 
   useEffect(() => {
     if (!matchId) return
+    setWorkspace(null)  // Clear stale data immediately to avoid mismatched chart/names
     const defaults = createDefaultFilters()
     setDraftFilters(defaults)
     setAppliedFilters(defaults)
@@ -544,6 +547,8 @@ export default function BetTypeWorkspace({
               onToggleFilters={() => setIsFiltersOpen(current => !current)}
               activeOverlayFilters={activeOverlayFilters}
               opponentRanks={workspace?.opponent_ranks || null}
+              homeTeamShortName={homeTeamShortName}
+              awayTeamShortName={awayTeamShortName}
             />
             <div className="metrics-panel-desktop-wrap">
               <MetricsPanel

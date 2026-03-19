@@ -883,8 +883,9 @@ function computeOverlayAvg(data, dataKey) {
   return count > 0 ? (sum / count) : null
 }
 
-function TeamBarChart({
+const TeamBarChart = memo(function TeamBarChart({
   title,
+  teamShortName,
   data,
   betType,
   line,
@@ -939,39 +940,43 @@ function TeamBarChart({
   const isCorners = isCornersBetType(normalizedBetType)
   const isSideCorners = isSideCornersBetType(normalizedBetType)
   const isLineType = isOverUnder || isCorners
-  const isOneXTwoOu = normalizedBetType === BET_TYPE_ONE_X_TWO_OU
-  const isDoubleChanceOu = normalizedBetType === BET_TYPE_DOUBLE_CHANCE_OU
-  const isBttsOu = normalizedBetType === BET_TYPE_BTTS_OU
-  const isFirstHalfOu = normalizedBetType === BET_TYPE_FIRST_HALF_OU
-  const isFirstHalf1X2 = normalizedBetType === BET_TYPE_FIRST_HALF_1X2
   const isDoubleChance = normalizedBetType === BET_TYPE_DOUBLE_CHANCE
   const isBtts = normalizedBetType === BET_TYPE_BTTS
   const isWeh = normalizedBetType === BET_TYPE_WIN_EITHER_HALF
   const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
-  const rawSeriesMax = readSeriesMax(data)
-  const referenceLineValue = isLineType ? line : (!isDoubleChance && !isBtts && !isWeh && !isWbh ? 0.5 : null)
-  const rawDomainMax = isLineType
-    ? Math.max(rawSeriesMax, line, isCorners ? CORNERS_LINE_MIN : OVER_UNDER_LINE_MIN)
-    : Math.max(rawSeriesMax, 1) * 1.08
-  const { ticks: yAxisTicks, axisMax: yAxisMax } = buildYAxisScale({
-    min: 0,
-    max: rawDomainMax,
-    referenceValue: referenceLineValue,
-  })
-  const hitRate = computeHitRate(data, normalizedBetType)
-  const hitRateToneClass = getHitRateToneClass(hitRate.percent)
-  const graphAvg = computeGraphAvg(data, normalizedBetType)
-  const seasonAvg = seasonAvgOverride != null ? seasonAvgOverride : computeSeasonAvg(data, normalizedBetType)
-  const averageMetricLabel = getAverageMetricLabel(normalizedBetType)
-  const lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
-  const hasLineSummaryLabel = Boolean(lineSummaryLabel)
+
+  const { rawSeriesMax, referenceLineValue, yAxisTicks, yAxisMax, hitRate, hitRateToneClass, graphAvg, seasonAvg, lineSummaryLabel, hasLineSummaryLabel } = useMemo(() => {
+    const _rawSeriesMax = readSeriesMax(data)
+    const _referenceLineValue = isLineType ? line : (!isDoubleChance && !isBtts && !isWeh && !isWbh ? 0.5 : null)
+    const rawDomainMax = isLineType
+      ? Math.max(_rawSeriesMax, line, isCorners ? CORNERS_LINE_MIN : OVER_UNDER_LINE_MIN)
+      : Math.max(_rawSeriesMax, 1) * 1.08
+    const { ticks, axisMax } = buildYAxisScale({ min: 0, max: rawDomainMax, referenceValue: _referenceLineValue })
+    const _hitRate = computeHitRate(data, normalizedBetType)
+    const _seasonAvg = seasonAvgOverride != null ? seasonAvgOverride : computeSeasonAvg(data, normalizedBetType)
+    const _lineSummaryLabel = getLineSummaryLabel(normalizedBetType, line)
+    return {
+      rawSeriesMax: _rawSeriesMax,
+      referenceLineValue: _referenceLineValue,
+      yAxisTicks: ticks,
+      yAxisMax: axisMax,
+      hitRate: _hitRate,
+      hitRateToneClass: getHitRateToneClass(_hitRate.percent),
+      graphAvg: computeGraphAvg(data, normalizedBetType),
+      seasonAvg: _seasonAvg,
+      lineSummaryLabel: _lineSummaryLabel,
+      hasLineSummaryLabel: Boolean(_lineSummaryLabel),
+    }
+  }, [data, normalizedBetType, line, isLineType, isCorners, isDoubleChance, isBtts, isWeh, isWbh, seasonAvgOverride])
+
   // Multi-overlay support
-  const overlayDataKeys = overlayConfigs.map(cfg => `overlay_${cfg.key}`)
-  const hasOverlay = overlayConfigs.length > 0 && data.some(d =>
+  const overlayDataKeys = useMemo(() => overlayConfigs.map(cfg => `overlay_${cfg.key}`), [overlayConfigs])
+  const hasOverlay = useMemo(() => overlayConfigs.length > 0 && data.some(d =>
     overlayDataKeys.some(dk => d[dk] != null)
-  )
-  const overlayScale = hasOverlay ? buildOverlayYAxisScale(data, overlayDataKeys) : null
+  ), [overlayConfigs.length, data, overlayDataKeys])
+  const overlayScale = useMemo(() => hasOverlay ? buildOverlayYAxisScale(data, overlayDataKeys) : null, [hasOverlay, data, overlayDataKeys])
   const firstRow = data[0] || null
+  const displayName = teamShortName || firstRow?.team_name || title
   const teamIdFromRaw = Number(
     firstRow?.venue === 'home'
       ? firstRow?._raw?.home_team_id
@@ -1008,6 +1013,7 @@ function TeamBarChart({
   const plotWidth = Math.max((containerWidth || 0) - (yAxisWidth + rightYAxisWidth + (xAxisPadding * 2)), 100)
   const barCategoryGap = computeBarCategoryGap(data.length)
   const barSize = computeBarSize(plotWidth, data.length)
+  const barRadius = Math.min(4, Math.floor(barSize / 2))
   const plotTop = chartMargin.top
   const plotBottom = chartHeight - chartMargin.bottom - X_AXIS_HEIGHT
   const plotHeight = Math.max(1, plotBottom - plotTop)
@@ -1085,12 +1091,12 @@ function TeamBarChart({
       <div className="pm-chart-header">
         <div className="pm-identity">
           {teamLogo ? (
-            <img src={teamLogo} alt={firstRow?.team_name || title} className="pm-logo" />
+            <img src={teamLogo} alt={displayName} className="pm-logo" />
           ) : (
-            <div className="pm-logo-fallback">{(firstRow?.team_name || title || '?').slice(0, 1)}</div>
+            <div className="pm-logo-fallback">{(displayName || '?').slice(0, 1)}</div>
           )}
           <div className="pm-name-block">
-            <span className="pm-team-name">{firstRow?.team_name || title}</span>
+            <span className="pm-team-name">{displayName}</span>
             <span className={`pm-subtitle ${hasLineSummaryLabel ? 'pm-subtitle--line' : ''}`}>{lineSummaryLabel || title}</span>
           </div>
         </div>
@@ -1255,7 +1261,7 @@ function TeamBarChart({
                   return `${row.fixture_display} | ${row.date_label} | Result ${row.result} | ${scoreline}`
                 }}
               />
-              <Bar yAxisId="left" dataKey="value" radius={[4, 4, 0, 0]} barSize={barSize}>
+              <Bar yAxisId="left" dataKey="value" radius={[barRadius, barRadius, 0, 0]} barSize={barSize}>
                 {data.map((entry) => (
                   <Cell key={`${entry.match_id}-${entry.label}-${entry.venue}`} fill={entry.color} />
                 ))}
@@ -1319,7 +1325,7 @@ function TeamBarChart({
       </div>
     </div>
   )
-}
+})
 
 export default memo(function ChartArea({
   recentMatches,
@@ -1336,6 +1342,8 @@ export default memo(function ChartArea({
   onToggleFilters,
   activeOverlayFilters,
   opponentRanks,
+  homeTeamShortName,
+  awayTeamShortName,
 }) {
   const activeTeamView = teamView ?? VIEW_BOTH
 
@@ -1484,6 +1492,7 @@ export default memo(function ChartArea({
         {activeTeamView !== VIEW_AWAY ? (
           <TeamBarChart
             title="Home Team Matches"
+            teamShortName={homeTeamShortName}
             data={homeData}
             betType={betType}
             line={line}
@@ -1502,6 +1511,7 @@ export default memo(function ChartArea({
         {activeTeamView !== VIEW_HOME ? (
           <TeamBarChart
             title="Away Team Matches"
+            teamShortName={awayTeamShortName}
             data={awayData}
             betType={betType}
             line={line}

@@ -311,6 +311,18 @@ html {
   object-fit: contain;
 }
 
+.fixture-team-logo-fallback {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--surface-elev);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+
 .fixture-team-name {
   font-size: 0.7rem;
   font-weight: 500;
@@ -423,6 +435,18 @@ html {
   width: 16px;
   height: 16px;
   object-fit: contain;
+}
+
+.fixture-bottom-logo-fallback {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface-elev);
+  color: var(--text-secondary);
+  font-size: 0.55rem;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
 }
 
 .fixture-bottom-vs {

@@ -12,10 +12,16 @@ from backend.contracts.filter_spec import FilterSpec
 class AnalyticsStore(AnalyticsStoreContract):
     def __init__(self):
         self._matches: dict[str, MatchAnalytics] = {}
+        self._team_index: dict[str, list[str]] = {}  # team_id -> [match_ids]
 
     def ingest(self, analytics: Iterable[MatchAnalytics]) -> None:
         for ma in analytics:
             self._matches[ma.match_id] = ma
+            # Build team index for O(1) lookups
+            for tid in (ma.home_team_id, ma.away_team_id):
+                if tid not in self._team_index:
+                    self._team_index[tid] = []
+                self._team_index[tid].append(ma.match_id)
 
     def query(self, request: EvidenceRequest) -> "EvidenceSubsetImpl":
         """Query team games based on match_id, perspective, and filters."""
@@ -64,14 +70,14 @@ class AnalyticsStore(AnalyticsStoreContract):
     ) -> pd.DataFrame:
         """Materialize all games where the team played (home or away)."""
         rows = []
-        for match_id, ma in self._matches.items():
-            row = None
-            
+        match_ids = self._team_index.get(team_id, [])
+        for match_id in match_ids:
+            ma = self._matches[match_id]
             if ma.home_team_id == team_id:
-                row = self._build_row(match_id, team_id, "home", ma, required_columns, extra_features)
-            elif ma.away_team_id == team_id:
-                row = self._build_row(match_id, team_id, "away", ma, required_columns, extra_features)
-            
+                venue = "home"
+            else:
+                venue = "away"
+            row = self._build_row(match_id, team_id, venue, ma, required_columns, extra_features)
             if row:
                 rows.append(row)
 

@@ -194,6 +194,8 @@ class FixtureRow:
     away_team_id: int
     home_team_name: str
     away_team_name: str
+    home_team_short_name: str
+    away_team_short_name: str
     home_team_score: int | None
     away_team_score: int | None
     finished: bool
@@ -268,6 +270,8 @@ def _save_fixture_file_cache(league_id: str, rows: list["FixtureRow"]) -> None:
                     "away_team_id": r.away_team_id,
                     "home_team_name": r.home_team_name,
                     "away_team_name": r.away_team_name,
+                    "home_team_short_name": r.home_team_short_name,
+                    "away_team_short_name": r.away_team_short_name,
                     "home_team_score": r.home_team_score,
                     "away_team_score": r.away_team_score,
                     "finished": r.finished,
@@ -294,6 +298,8 @@ def _fixture_dicts_to_rows(dicts: list[dict[str, Any]]) -> list["FixtureRow"]:
             away_team_id=d.get("away_team_id", 0),
             home_team_name=d.get("home_team_name", ""),
             away_team_name=d.get("away_team_name", ""),
+            home_team_short_name=d.get("home_team_short_name", d.get("home_team_name", "")),
+            away_team_short_name=d.get("away_team_short_name", d.get("away_team_name", "")),
             home_team_score=d.get("home_team_score"),
             away_team_score=d.get("away_team_score"),
             finished=d.get("finished", False),
@@ -425,6 +431,8 @@ def _sofascore_event_to_fixture_row(event: dict[str, Any], league_id: str) -> Fi
         away_team_id=_safe_int(away_team.get("id"), 0),
         home_team_name=_format_team_name(str(home_team.get("name", ""))),
         away_team_name=_format_team_name(str(away_team.get("name", ""))),
+        home_team_short_name=_format_team_name(str(home_team.get("shortName", home_team.get("name", "")))),
+        away_team_short_name=_format_team_name(str(away_team.get("shortName", away_team.get("name", "")))),
         home_team_score=_safe_opt_int(home_score.get("normaltime")),
         away_team_score=_safe_opt_int(away_score.get("normaltime")),
         finished=_is_sofascore_event_finished(event),
@@ -761,6 +769,8 @@ def _understat_event_to_fixture_row(event: dict[str, Any], league_id: str) -> Fi
         away_team_id=away_team_id,
         home_team_name=home_name,
         away_team_name=away_name,
+        home_team_short_name=home_name,
+        away_team_short_name=away_name,
         home_team_score=home_score,
         away_team_score=away_score,
         finished=finished,
@@ -863,6 +873,53 @@ def _normalize_range(value: Any, default_low: float = 0.0, default_high: float =
 _raw_df_cache: dict[str, Any] = {"df": None, "ts": 0.0}
 _RAW_DF_TTL = 300  # seconds – refresh CSV data every 5 minutes
 
+# ---------------------------------------------------------------------------
+# Server-side workspace response cache
+# Caches full JSON-ready dicts keyed by (endpoint, match_id, filters_hash).
+# Avoids re-running evidence retrieval + recent_matches construction.
+# ---------------------------------------------------------------------------
+_workspace_response_cache: dict[str, tuple[float, dict]] = {}  # key -> (ts, response_dict)
+_WORKSPACE_RESPONSE_TTL = 300  # seconds – aligned with raw data TTL
+_WORKSPACE_RESPONSE_MAX_ENTRIES = 256
+
+
+def _workspace_cache_key(endpoint: str, payload: dict) -> str:
+    """Build a deterministic cache key from the endpoint name and request payload."""
+    import hashlib
+    # Include all fields that affect the response
+    key_parts = [
+        endpoint,
+        str(payload.get("match_id", "")),
+        str(payload.get("home_team_id", "")),
+        str(payload.get("away_team_id", "")),
+        str(payload.get("line", "")),
+        json.dumps(payload.get("filters", {}), sort_keys=True),
+        json.dumps(payload.get("evidenceFilters", []), sort_keys=True),
+    ]
+    raw = "|".join(key_parts)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _get_cached_workspace(key: str) -> dict | None:
+    """Return cached response if still valid, else None."""
+    entry = _workspace_response_cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    if (monotonic() - ts) < _WORKSPACE_RESPONSE_TTL:
+        return data
+    del _workspace_response_cache[key]
+    return None
+
+
+def _set_cached_workspace(key: str, data: dict) -> None:
+    """Store a workspace response in cache, evicting oldest if full."""
+    if len(_workspace_response_cache) >= _WORKSPACE_RESPONSE_MAX_ENTRIES:
+        # Evict oldest entry
+        oldest_key = min(_workspace_response_cache, key=lambda k: _workspace_response_cache[k][0])
+        del _workspace_response_cache[oldest_key]
+    _workspace_response_cache[key] = (monotonic(), data)
+
 def _extract_penalty_goals(series: pd.Series) -> pd.Series:
     """Vectorized extraction of penalty_goals from shot payload strings."""
     def _parse_one(raw):
@@ -942,6 +999,8 @@ def _load_raw_df() -> pd.DataFrame:
     if "total_penalty_goals" not in raw_df.columns:
         raw_df["total_penalty_goals"] = raw_df["penalty_goals_home"] + raw_df["penalty_goals_away"]
 
+    # Pre-sort by match_id descending so anchor lookups can skip per-query sorts
+    raw_df = raw_df.sort_values("match_id", ascending=False, ignore_index=True)
     _raw_df_cache["df"] = raw_df
     _raw_df_cache["ts"] = now
     return raw_df
@@ -1024,6 +1083,8 @@ def _fetch_live_fixture_snapshot() -> FixtureSnapshot:
                 away_team_id=away_team_id,
                 home_team_name=team_map.get(home_team_id, f"Team {home_team_id}"),
                 away_team_name=team_map.get(away_team_id, f"Team {away_team_id}"),
+                home_team_short_name=team_map.get(home_team_id, f"Team {home_team_id}"),
+                away_team_short_name=team_map.get(away_team_id, f"Team {away_team_id}"),
                 home_team_score=_safe_opt_int(item.get("team_h_score")),
                 away_team_score=_safe_opt_int(item.get("team_a_score")),
                 finished=bool(item.get("finished", False)),
@@ -1095,6 +1156,8 @@ def _load_fixture_csv_snapshot() -> FixtureSnapshot | None:
                     away_team_id=_safe_int(item.get("away_team_id"), 0),
                     home_team_name=item.get("home_team") or "",
                     away_team_name=item.get("away_team") or "",
+                    home_team_short_name=item.get("home_team_short") or item.get("home_team") or "",
+                    away_team_short_name=item.get("away_team_short") or item.get("away_team") or "",
                     home_team_score=_safe_opt_int(item.get("home_team_score")),
                     away_team_score=_safe_opt_int(item.get("away_team_score")),
                     finished=str(item.get("finished", "False")).lower() == "true",
@@ -1112,7 +1175,7 @@ def _load_fixture_csv_snapshot() -> FixtureSnapshot | None:
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def _historical_fixture_snapshot() -> FixtureSnapshot:
     raw_df = _load_raw_df()
     needed_cols = ["match_id", "home_team_id", "away_team_id", "home_team", "away_team"]
@@ -1158,6 +1221,8 @@ def _historical_fixture_snapshot() -> FixtureSnapshot:
                 away_team_id=int(t.away_team_id),
                 home_team_name=_format_team_name(str(t.home_team)),
                 away_team_name=_format_team_name(str(t.away_team)),
+                home_team_short_name=_format_team_name(str(t.home_team)),
+                away_team_short_name=_format_team_name(str(t.away_team)),
                 home_team_score=None,
                 away_team_score=None,
                 finished=True,
@@ -1172,7 +1237,7 @@ def _historical_fixture_snapshot() -> FixtureSnapshot:
     )
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def _historical_fixture_index() -> dict[int, FixtureRow]:
     return {fixture.match_id: fixture for fixture in _historical_fixture_snapshot().fixtures}
 
@@ -1496,10 +1561,19 @@ def _parse_filters(payload: dict[str, Any]) -> list[FilterSpec]:
     return _default_evidence_filters({})
 
 
-@lru_cache(maxsize=8)
+_league_table_cache: dict[str, Any] = {}  # league_id -> {"df": DataFrame, "ts": float}
+_LEAGUE_TABLE_TTL = 300  # seconds
+
 def _load_league_table(league_id: str) -> pd.DataFrame:
     if not league_id:
         return pd.DataFrame()
+
+    now = monotonic()
+    cached = _league_table_cache.get(league_id)
+    if cached is not None and now - cached["ts"] < _LEAGUE_TABLE_TTL:
+        return cached["df"]
+
+    result = pd.DataFrame()
 
     # Try MongoDB first
     col = get_collection("league_tables")
@@ -1509,21 +1583,23 @@ def _load_league_table(league_id: str) -> pd.DataFrame:
             if docs:
                 table_df = pd.DataFrame(docs)
                 if not table_df.empty and "team" in table_df.columns:
-                    return table_df
+                    result = table_df
         except Exception:
             pass
 
     # Fallback to local CSV
-    table_path = LEAGUES_DIR / str(league_id) / "league_table.csv"
-    if not table_path.exists():
-        return pd.DataFrame()
-    try:
-        table_df = pd.read_csv(table_path)
-    except Exception:
-        return pd.DataFrame()
-    if table_df.empty or "team" not in table_df.columns:
-        return pd.DataFrame()
-    return table_df
+    if result.empty:
+        table_path = LEAGUES_DIR / str(league_id) / "league_table.csv"
+        if table_path.exists():
+            try:
+                table_df = pd.read_csv(table_path)
+                if not table_df.empty and "team" in table_df.columns:
+                    result = table_df
+            except Exception:
+                pass
+
+    _league_table_cache[league_id] = {"df": result, "ts": now}
+    return result
 
 
 def _normalize_rank_range(raw_value: Any, max_rank: int) -> tuple[int, int] | None:
@@ -1589,6 +1665,20 @@ def _resolve_opponent_team_name_from_row(row: pd.Series, match_lookup: dict[int,
     return ""
 
 
+def _resolve_opponent_names_vectorized(df: pd.DataFrame, match_lookup: dict[int, tuple[str, str]]) -> pd.Series:
+    """Vectorized version of opponent name resolution – avoids slow .apply(axis=1)."""
+    match_ids = df["match_id"].astype(int)
+    venues = df["venue"].astype(str).str.strip().str.lower()
+
+    home_names = match_ids.map(lambda mid: match_lookup.get(mid, ("", ""))[0])
+    away_names = match_ids.map(lambda mid: match_lookup.get(mid, ("", ""))[1])
+
+    result = pd.Series("", index=df.index)
+    result = result.where(venues != "home", away_names)
+    result = result.where(venues != "away", home_names)
+    return result
+
+
 def _apply_opponent_rank_filters(
     df: pd.DataFrame,
     filters_payload: dict[str, Any],
@@ -1618,7 +1708,7 @@ def _apply_opponent_rank_filters(
         return df
 
     match_lookup = _match_name_index()
-    opponent_names = df.apply(lambda row: _resolve_opponent_team_name_from_row(row, match_lookup), axis=1)
+    opponent_names = _resolve_opponent_names_vectorized(df, match_lookup)
     opponent_norm = opponent_names.map(_normalize_team_name)
     filtered_df = df.copy()
     filtered_opponent_norm = opponent_norm.copy()
@@ -1703,8 +1793,21 @@ def _select_similarity_k(x_pca: np.ndarray) -> int:
     return best_valid_k if best_valid is not None else best_any_k
 
 
-@lru_cache(maxsize=1)
+_similarity_index_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_SIMILARITY_INDEX_TTL = 600  # seconds – rebuild cluster index every 10 minutes
+
 def _global_team_similarity_index() -> dict[str, Any]:
+    now = monotonic()
+    if _similarity_index_cache["data"] is not None and now - _similarity_index_cache["ts"] < _SIMILARITY_INDEX_TTL:
+        return _similarity_index_cache["data"]
+
+    result = _build_team_similarity_index()
+    _similarity_index_cache["data"] = result
+    _similarity_index_cache["ts"] = now
+    return result
+
+
+def _build_team_similarity_index() -> dict[str, Any]:
     empty = {
         "frame": pd.DataFrame(),
         "k_effective": 0,
@@ -1886,7 +1989,7 @@ def _apply_similar_teams_filter(
         return df
 
     match_lookup = _match_name_index()
-    opponent_names = df.apply(lambda row: _resolve_opponent_team_name_from_row(row, match_lookup), axis=1)
+    opponent_names = _resolve_opponent_names_vectorized(df, match_lookup)
     opponent_norm = opponent_names.map(_normalize_team_name)
 
     before_count = int(len(df))
@@ -1937,21 +2040,25 @@ def _build_match_datetime_index_from_df(df: pd.DataFrame) -> dict[int, pd.Timest
     return dict(zip(enriched["match_id"].astype(int), enriched["match_datetime"]))
 
 
-@lru_cache(maxsize=1)
+_match_datetime_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
 def _match_datetime_index() -> dict[int, pd.Timestamp]:
+    now = monotonic()
+    if _match_datetime_cache["data"] is not None and now - _match_datetime_cache["ts"] < _RAW_DF_TTL:
+        return _match_datetime_cache["data"]
+
     raw_df = _load_raw_df()
     mapping = _build_match_datetime_index_from_df(raw_df)
-    if mapping:
-        return mapping
+    if not mapping:
+        # Local fallback if the primary analytics file lacks date columns.
+        if SEASON_DATE_FALLBACK_PATH.exists():
+            fallback_df = pd.read_csv(SEASON_DATE_FALLBACK_PATH)
+            mapping = _build_match_datetime_index_from_df(fallback_df)
 
-    # Local fallback if the primary analytics file lacks date columns.
-    if SEASON_DATE_FALLBACK_PATH.exists():
-        fallback_df = pd.read_csv(SEASON_DATE_FALLBACK_PATH)
-        mapping = _build_match_datetime_index_from_df(fallback_df)
-        if mapping:
-            return mapping
-
-    return {}
+    result = mapping or {}
+    _match_datetime_cache["data"] = result
+    _match_datetime_cache["ts"] = now
+    return result
 
 
 def _sort_team_history(df: pd.DataFrame) -> pd.DataFrame:
@@ -2313,13 +2420,19 @@ def _split_side_corner_metrics(df: pd.DataFrame, line: float, side: str) -> dict
     }
 
 
-@lru_cache(maxsize=1)
+_match_name_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
 def _match_name_index() -> dict[int, tuple[str, str]]:
+    now = monotonic()
+    if _match_name_cache["data"] is not None and now - _match_name_cache["ts"] < _RAW_DF_TTL:
+        return _match_name_cache["data"]
     raw_df = _load_raw_df()
     match_df = raw_df[["match_id", "home_team", "away_team"]].drop_duplicates(subset=["match_id"])
     mapping: dict[int, tuple[str, str]] = {}
     for t in match_df.itertuples(index=False):
         mapping[int(t.match_id)] = (_format_team_name(str(t.home_team)), _format_team_name(str(t.away_team)))
+    _match_name_cache["data"] = mapping
+    _match_name_cache["ts"] = now
     return mapping
 
 
@@ -3173,6 +3286,7 @@ def _resolve_team_anchor_match(
         if not league_matches.empty:
             scoped_df = league_matches
 
+    # raw_df is pre-sorted by match_id descending, so .iloc[0] gives the latest match
     for candidate_id in _candidate_team_ids(team_id, team_name):
         if preferred_perspective == "home":
             preferred = scoped_df[scoped_df["home_team_id"] == candidate_id]
@@ -3180,14 +3294,14 @@ def _resolve_team_anchor_match(
             preferred = scoped_df[scoped_df["away_team_id"] == candidate_id]
 
         if not preferred.empty:
-            row = preferred.sort_values("match_id", ascending=False).iloc[0]
+            row = preferred.iloc[0]
             return int(row["match_id"]), preferred_perspective
 
         fallback = scoped_df[
             (scoped_df["home_team_id"] == candidate_id) | (scoped_df["away_team_id"] == candidate_id)
         ]
         if not fallback.empty:
-            row = fallback.sort_values("match_id", ascending=False).iloc[0]
+            row = fallback.iloc[0]
             perspective = "home" if int(row["home_team_id"]) == candidate_id else "away"
             return int(row["match_id"]), perspective
 
@@ -3313,8 +3427,10 @@ def create_app() -> Flask:
                 "gameweek": f.gameweek,
                 "home_team_id": f.home_team_id,
                 "home_team_name": f.home_team_name,
+                "home_team_short_name": f.home_team_short_name,
                 "away_team_id": f.away_team_id,
                 "away_team_name": f.away_team_name,
+                "away_team_short_name": f.away_team_short_name,
                 "home_team_score": f.home_team_score,
                 "away_team_score": f.away_team_score,
                 "finished": f.finished,
@@ -3360,6 +3476,12 @@ def create_app() -> Flask:
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
 
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("1x2", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
 
@@ -3372,6 +3494,7 @@ def create_app() -> Flask:
         if home_team_id < 0 or away_team_id < 0:
             return jsonify({"error": "home_team_id and away_team_id are required"}), 400
 
+        _t0 = monotonic()
         home_df = pd.DataFrame()
         away_df = pd.DataFrame()
         notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
@@ -3379,6 +3502,7 @@ def create_app() -> Flask:
         try:
             filters = _parse_filters(payload)
             raw_df = _load_raw_df()
+            _t1 = monotonic()
             home_anchor = _resolve_team_anchor_match(
                 raw_df,
                 home_team_id,
@@ -3393,9 +3517,11 @@ def create_app() -> Flask:
                 "away",
                 league_id=league_id_for_ranking,
             )
+            _t2 = monotonic()
 
             store = _build_store()
             workspace = OneXTwoWorkspace(store, outcome_type="1")
+            _t3 = monotonic()
 
             if home_anchor is not None:
                 home_anchor_match_id, home_perspective = home_anchor
@@ -3426,6 +3552,7 @@ def create_app() -> Flask:
                 notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
             else:
                 notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+            _t4 = monotonic()
         except Exception as exc:
             return jsonify({"error": str(exc)}), 400
 
@@ -3460,6 +3587,7 @@ def create_app() -> Flask:
             notes=notes,
             side_label="away",
         )
+        _t5 = monotonic()
 
         home_metrics = _split_result_counts(home_df)
         away_metrics = _split_result_counts(away_df)
@@ -3494,6 +3622,11 @@ def create_app() -> Flask:
             away_team_name,
         )
 
+        _t6 = monotonic()
+        recent_home = _build_recent_matches(home_df, league_id=league_id_for_ranking)
+        recent_away = _build_recent_matches(away_df, league_id=league_id_for_ranking)
+        _t7 = monotonic()
+
         response = {
             "workspace": {
                 "bet_type": "1X2",
@@ -3512,12 +3645,24 @@ def create_app() -> Flask:
             },
             "chartSeries": chart_series,
             "recent_matches": {
-                "home": _build_recent_matches(home_df, league_id=league_id_for_ranking),
-                "away": _build_recent_matches(away_df, league_id=league_id_for_ranking),
+                "home": recent_home,
+                "away": recent_away,
             },
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _t8 = monotonic()
+        print(
+            f"[TIMING 1x2] match={requested_match_id} "
+            f"load_raw={(_t1-_t0)*1000:.0f}ms "
+            f"anchors={(_t2-_t1)*1000:.0f}ms "
+            f"store+evidence={(_t4-_t2)*1000:.0f}ms "
+            f"filters={(_t5-_t4)*1000:.0f}ms "
+            f"recent_matches={(_t7-_t6)*1000:.0f}ms "
+            f"total={(_t8-_t0)*1000:.0f}ms",
+            flush=True,
+        )
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/over_under", methods=["POST", "OPTIONS"])
@@ -3529,6 +3674,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("over_under", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
 
@@ -3697,6 +3848,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/double_chance", methods=["POST", "OPTIONS"])
@@ -3708,6 +3860,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("double_chance", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
@@ -3860,6 +4018,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/btts", methods=["POST", "OPTIONS"])
@@ -3871,6 +4030,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("btts", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
@@ -4032,6 +4197,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/1x2_ou", methods=["POST", "OPTIONS"])
@@ -4043,6 +4209,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("1x2_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -4232,6 +4404,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/double_chance_ou", methods=["POST", "OPTIONS"])
@@ -4243,6 +4416,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("double_chance_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -4432,6 +4611,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/btts_ou", methods=["POST", "OPTIONS"])
@@ -4443,6 +4623,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("btts_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -4632,6 +4818,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/first_half_ou", methods=["POST", "OPTIONS"])
@@ -4643,6 +4830,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("first_half_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 1.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -4817,6 +5010,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/first_half_1x2", methods=["POST", "OPTIONS"])
@@ -4828,6 +5022,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("first_half_1x2", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
@@ -5000,6 +5200,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/win_either_half", methods=["POST", "OPTIONS"])
@@ -5011,6 +5212,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("win_either_half", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
@@ -5166,6 +5373,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/win_both_halves", methods=["POST", "OPTIONS"])
@@ -5177,6 +5385,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("win_both_halves", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         snapshot = _get_nonblocking_fixture_snapshot()
         fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
@@ -5332,6 +5546,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/home_ou", methods=["POST", "OPTIONS"])
@@ -5343,6 +5558,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("home_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -5474,6 +5695,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/away_ou", methods=["POST", "OPTIONS"])
@@ -5485,6 +5707,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("away_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 2.5)
         snapshot = _get_nonblocking_fixture_snapshot()
@@ -5616,6 +5844,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/corners", methods=["POST", "OPTIONS"])
@@ -5627,6 +5856,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("corners", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 8.5)
 
@@ -5782,6 +6017,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     # ── Home / Away Corners endpoints ──────────────────────────────────────
@@ -5795,6 +6031,12 @@ def create_app() -> Flask:
         requested_match_id = _safe_int(payload.get("match_id"), -1)
         if requested_match_id < 0:
             return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key(f"{side}_corners", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
 
         line = _safe_float(payload.get("line"), 4.5)
 
@@ -5915,6 +6157,7 @@ def create_app() -> Flask:
             "opponent_ranks": opponent_ranks,
             "notes": notes,
         }
+        _set_cached_workspace(cache_key, response)
         return jsonify(response)
 
     @app.route("/api/workspace/home_corners", methods=["POST", "OPTIONS"])
@@ -6179,6 +6422,8 @@ app = create_app()
 try:
     _load_raw_df()
     _build_store()
+    _match_name_index()
+    _match_datetime_index()
 except Exception:
     pass  # Non-fatal — will retry on first request
 

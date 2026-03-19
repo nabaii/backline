@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
-import { getLeagues, getFixturesForLeague } from '../api/backendApi'
+import { getLeagues, getFixturesForLeague, getWorkspace1X2 } from '../api/backendApi'
 import { getTeamLogo } from '../utils/premierLeagueLogos'
 import LeagueSelector from './LeagueSelector'
 import FixtureList from './FixtureList'
@@ -26,8 +26,8 @@ function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
       {fixtures.map((fixture) => {
         const homeLogo = getTeamLogo(fixture.home_team_name, fixture.home_team_id)
         const awayLogo = getTeamLogo(fixture.away_team_name, fixture.away_team_id)
-        const homeShort = (fixture.home_team_name || '').split(' ').slice(-1)[0] || '?'
-        const awayShort = (fixture.away_team_name || '').split(' ').slice(-1)[0] || '?'
+        const homeShort = fixture.home_team_short_name || fixture.home_team_name || '?'
+        const awayShort = fixture.away_team_short_name || fixture.away_team_name || '?'
         return (
           <button
             key={fixture.match_id}
@@ -36,12 +36,16 @@ function FixtureBottomMenu({ fixtures = [], selected, onSelect }) {
             onClick={() => onSelect(fixture.match_id)}
           >
             <span className="fixture-bottom-team">
-              {homeLogo ? <img src={homeLogo} alt={fixture.home_team_name} className="fixture-bottom-logo" /> : null}
+              {homeLogo
+                ? <img src={homeLogo} alt={fixture.home_team_name} className="fixture-bottom-logo" />
+                : <span className="fixture-bottom-logo-fallback">{homeShort[0]}</span>}
               <span>{homeShort}</span>
             </span>
             <span className="fixture-bottom-vs">vs</span>
             <span className="fixture-bottom-team">
-              {awayLogo ? <img src={awayLogo} alt={fixture.away_team_name} className="fixture-bottom-logo" /> : null}
+              {awayLogo
+                ? <img src={awayLogo} alt={fixture.away_team_name} className="fixture-bottom-logo" />
+                : <span className="fixture-bottom-logo-fallback">{awayShort[0]}</span>}
               <span>{awayShort}</span>
             </span>
           </button>
@@ -114,11 +118,24 @@ export default function KitchenPage() {
       })
   }, [])
 
+  // Prefetch the default workspace (1X2) for a fixture so the backend cache is warm
+  const prefetchWorkspace = useCallback((fixture, leagueId) => {
+    if (!fixture) return
+    getWorkspace1X2({
+      match_id: fixture.match_id,
+      home_team_id: fixture.home_team_id,
+      away_team_id: fixture.away_team_id,
+      home_team_name: fixture.home_team_name,
+      away_team_name: fixture.away_team_name,
+      league_id: leagueId,
+    }).catch(() => {}) // fire-and-forget – warms the server cache
+  }, [])
+
   useEffect(() => {
     if (!selectedLeague) return
     let cancelled = false
     setError(null)
-    setSelectedMatch(null)
+    // Don't clear selectedMatch – keep showing current workspace during transition
     const cachedFixtures = fixturesCacheRef.current.get(selectedLeague)
     if (cachedFixtures) {
       setFixtures(cachedFixtures)
@@ -137,7 +154,11 @@ export default function KitchenPage() {
         fixturesCacheRef.current.set(selectedLeague, nextFixtures)
         setFixtures(nextFixtures)
         if (nextFixtures.length) {
-          setSelectedMatch(pickSelectedMatch(selectedLeague, nextFixtures))
+          const nextMatch = pickSelectedMatch(selectedLeague, nextFixtures)
+          setSelectedMatch(nextMatch)
+          // Prefetch workspace for the first fixture so chart loads faster
+          const firstFixture = nextFixtures.find(f => f.match_id === nextMatch)
+          prefetchWorkspace(firstFixture, selectedLeague)
         } else {
           setSelectedMatch(null)
           setError('No upcoming fixtures available from the backend for the selected league.')
@@ -158,7 +179,7 @@ export default function KitchenPage() {
     return () => {
       cancelled = true
     }
-  }, [selectedLeague])
+  }, [selectedLeague, prefetchWorkspace])
 
   useEffect(() => {
     if (!selectedLeague || !selectedMatch) return
@@ -212,6 +233,8 @@ export default function KitchenPage() {
                 awayTeamId={selectedFixture?.away_team_id}
                 homeTeamName={selectedFixture?.home_team_name}
                 awayTeamName={selectedFixture?.away_team_name}
+                homeTeamShortName={selectedFixture?.home_team_short_name}
+                awayTeamShortName={selectedFixture?.away_team_short_name}
                 leagueId={selectedLeague}
                 initialBetType={initialBetType}
               />

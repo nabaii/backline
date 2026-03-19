@@ -63,6 +63,7 @@ export default function ChatMiniChart({ chartData, betType, line, teamName, onNa
 
   if (!data.length) return null
 
+  const miniBarRadius = data.length > 20 ? 2 : 4
   const isLineType = betType === 'over_under' || betType === 'corners'
   const maxVal = Math.max(...data.map(d => d.value ?? 0), isLineType ? (line || 0) + 1 : 1.5)
   const yMax = Math.ceil(maxVal + 0.5)
@@ -134,7 +135,7 @@ export default function ChatMiniChart({ chartData, betType, line, teamName, onNa
 
             <Bar
               dataKey="value"
-              radius={[4, 4, 0, 0]}
+              radius={[miniBarRadius, miniBarRadius, 0, 0]}
               isAnimationActive={false}
             >
               {data.map((d, i) => (

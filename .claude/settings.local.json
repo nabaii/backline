@@ -54,7 +54,18 @@
       "Bash(python -c \"import ssl; print\\(''OpenSSL:'', ssl.OPENSSL_VERSION\\); import certifi; print\\(''certifi:'', certifi.__version__\\); import pymongo; print\\(''pymongo:'', pymongo.version\\)\")",
       "Bash(python backend/update_data.py)",
       "Bash(python update_data.py)",
-      "Bash(python -c \"from backend.bet_type.corners.corners import CornerWorkspace, HomeCornerWorkspace, AwayCornerWorkspace; print\\(''OK''\\)\")"
+      "Bash(python -c \"from backend.bet_type.corners.corners import CornerWorkspace, HomeCornerWorkspace, AwayCornerWorkspace; print\\(''OK''\\)\")",
+      "Bash(grep -n \"recharts\\\\|<Bar\\\\|<BarChart\" /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src/components/*.jsx -i)",
+      "Bash(grep -n \"radius=\\\\|borderRadius\" /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src/components/*.jsx)",
+      "Bash(npx vite:*)",
+      "Bash(xargs grep:*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''backend/backend_api.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(find /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src/components -name *.jsx -o -name *.js)",
+      "Bash(grep -r \"useMemo\\\\|useCallback\\\\|memo\" /c/Users/enaic/OneDrive/Desktop/backline/backline_v2/frontend/src/components/*.jsx)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''backend/backend_api.py'', doraise=True\\); print\\(''Backend OK''\\)\")",
+      "Bash(python -c \"from backend.store.analytics_store import AnalyticsStore; print\\(''AnalyticsStore OK''\\)\")",
+      "Bash(python -c \"import backend.backend_api; print\\(''''backend_api OK''''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''backend/backend_api.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")"
     ]
   }
 }
