@@ -1,0 +1,11 @@
+frontend/
+.git/
+__pycache__/
+*.pyc
+*.ipynb
+reference/
+sandbox/
+docs/
+out.txt
+.env
+node_modules/

@@ -1,0 +1,6457 @@
+from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
+import csv
+import difflib
+import gzip
+import json
+import os
+import re
+import zlib
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
+from threading import Lock
+from time import monotonic
+from typing import Any
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+
+import numpy as np
+import pandas as pd
+from flask import Flask, Response, jsonify, request, stream_with_context
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from sklearn.preprocessing import StandardScaler
+
+from backend.bet_type.double_chance.double_chance import DoubleChanceWorkspace
+from backend.bet_type.corners.corners import AwayCornerWorkspace, CornerWorkspace, HomeCornerWorkspace
+from backend.bet_type.over_under.over_under import OverUnderWorkspace
+from backend.bet_type.one_x_two.one_x_two import OneXTwoWorkspace
+from backend.builders.match_analytics_builder import MatchAnalyticsBuilder
+from backend.contracts.evidence import EvidenceRequest
+from backend.contracts.filter_spec import FilterSpec
+from backend.filters.filters import (
+    FieldTiltFilter,
+    GoalsConceded,
+    GoalsScored,
+    OpponentPossessionFilter,
+    OpponentMomentumFilter,
+    OpponentXG,
+    TeamShotXGFilter,
+    TeamPossessionFilter,
+    TeamMomentumFilter,
+    TeamXG,
+    TotalMatchGoals,
+    TotalXG,
+    VenueFilter,
+)
+from backend.store.analytics_store import AnalyticsStore
+from backend.db import get_collection
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = PROJECT_ROOT / "data" / "raw"
+LEAGUES_DIR = DATA_DIR / "leagues"
+FIXTURE_CSV_PATH = DATA_DIR / "EPL_fixture.csv"
+SEASON_DATE_FALLBACK_PATH = DATA_DIR / "season_df.csv"
+PRIMARY_SEASON_DATA_PATH = DATA_DIR / "season_df.csv"
+LEGACY_SEASON_DATA_PATH = DATA_DIR / "season_df_v1.csv"
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
+CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
+FIXTURE_CACHE_DIR = PROJECT_ROOT / "data" / "cache"
+
+
+def _load_all_season_dfs() -> "pd.DataFrame":
+    """Load and concatenate season_df.csv from all league folders under LEAGUES_DIR."""
+    frames = []
+    for league_dir in sorted(LEAGUES_DIR.iterdir()):
+        csv_path = league_dir / "season_df.csv"
+        if csv_path.exists():
+            frames.append(pd.read_csv(csv_path))
+    if not frames:
+        # Fallback to the top-level file
+        frames.append(pd.read_csv(PRIMARY_SEASON_DATA_PATH))
+    return pd.concat(frames, ignore_index=True)
+
+# â"€â"€ Multi-league registry â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+LEAGUE_REGISTRY: list[dict[str, str]] = [
+    {"id": "england_premier_league",  "name": "Premier League",  "country": "ENG", "flag": "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"},
+    {"id": "spain_la_liga",           "name": "La Liga",         "country": "ESP", "flag": "\U0001F1EA\U0001F1F8"},
+    {"id": "germany_bundesliga",      "name": "Bundesliga",      "country": "GER", "flag": "\U0001F1E9\U0001F1EA"},
+    {"id": "italy_serie_a",           "name": "Serie A",         "country": "ITA", "flag": "\U0001F1EE\U0001F1F9"},
+    {"id": "france_ligue_1",          "name": "Ligue 1",         "country": "FRA", "flag": "\U0001F1EB\U0001F1F7"},
+]
+LEAGUE_ID_SET = {lg["id"] for lg in LEAGUE_REGISTRY}
+
+FPL_BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
+FPL_FIXTURES_URL = "https://fantasy.premierleague.com/api/fixtures/"
+FPL_REQUEST_TIMEOUT_SECONDS = 30
+FPL_CACHE_TTL_SECONDS = 60
+SOFASCORE_FIXTURE_CACHE_TTL_SECONDS = 600
+UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS = 900
+SOFASCORE_LEAGUE_NAME_BY_ID: dict[str, str] = {
+    "spain_la_liga": "Spain La Liga",
+    "germany_bundesliga": "Germany Bundesliga",
+    "italy_serie_a": "Italy Serie A",
+    "france_ligue_1": "France Ligue 1",
+}
+UNDERSTAT_LEAGUE_NAME_BY_ID: dict[str, str] = {
+    "spain_la_liga": "La liga",
+    "germany_bundesliga": "Bundesliga",
+    "italy_serie_a": "Serie A",
+    "france_ligue_1": "Ligue 1",
+}
+UNDERSTAT_MATCH_ID_OFFSET_BY_LEAGUE: dict[str, int] = {
+    "spain_la_liga": 7_100_000_000,
+    "germany_bundesliga": 7_200_000_000,
+    "italy_serie_a": 7_300_000_000,
+    "france_ligue_1": 7_400_000_000,
+}
+SIMILAR_TEAMS_MODE_OFF = "off"
+SIMILAR_TEAMS_MODE_PCA_CLUSTER = "pca_cluster"
+SIMILAR_TEAMS_DEFAULT_LIMIT = 8
+SIMILAR_TEAMS_MIN_MATCHES = 5
+SIMILAR_TEAMS_MIN_K = 2
+SIMILAR_TEAMS_MAX_K = 8
+SIMILAR_TEAMS_MIN_CLUSTER_SIZE = 2
+SIMILAR_TEAMS_MAX_CLUSTER_SHARE = 0.8
+SIMILAR_TEAMS_PCA_EXPLAINED_VARIANCE = 0.9
+
+TEAM_NAME_ALIASES = {
+    "mancity": "manchestercity",
+    "manutd": "manchesterunited",
+    "leeds": "leedsunited",
+    "newcastle": "newcastleunited",
+    "nottmforest": "nottinghamforest",
+    "spurs": "tottenhamhotspur",
+    "westham": "westhamunited",
+    "wolves": "wolverhampton",
+    "brighton": "brightonhovealbion",
+}
+
+OPPONENT_RANK_FILTER_CONFIG: dict[str, dict[str, Any]] = {
+    "opponent_rank_xgd_range": {
+        "label": "xGD",
+        "table_column": "expected_goal_difference",
+        "ascending": False,
+    },
+    "opponent_rank_xgf_range": {
+        "label": "xGF",
+        "table_column": "expected_goals_for",
+        "ascending": False,
+    },
+    "opponent_rank_xga_range": {
+        "label": "xGA",
+        "table_column": "expected_goals_against",
+        "ascending": True,
+    },
+    "opponent_rank_position_range": {
+        "label": "Position",
+        "table_column": "rank",
+        "ascending": True,
+    },
+    "opponent_rank_corners_range": {
+        "label": "Corners",
+        "table_column": "average_corners",
+        "ascending": False,
+    },
+    "opponent_rank_momentum_range": {
+        "label": "Momentum",
+        "table_column": "momentum",
+        "ascending": False,
+    },
+    "opponent_rank_possession_range": {
+        "label": "Possession",
+        "table_column": "average_possession",
+        "ascending": False,
+    },
+}
+
+DATE_COLUMN_CANDIDATES = (
+    "match_datetime",
+    "datetime",
+    "date",
+    "kickoff",
+    "kickoff_time",
+    "start_time",
+    "startTimestamp",
+    "start_timestamp",
+)
+
+
+@dataclass(frozen=True)
+class FixtureRow:
+    match_id: int
+    league_id: str
+    gameweek: int
+    kickoff: str
+    home_team_id: int
+    away_team_id: int
+    home_team_name: str
+    away_team_name: str
+    home_team_short_name: str
+    away_team_short_name: str
+    home_team_score: int | None
+    away_team_score: int | None
+    finished: bool
+
+
+@dataclass(frozen=True)
+class FixtureSnapshot:
+    fixtures: list[FixtureRow]
+    current_gameweek: int
+    updated_at: str
+    source: str
+
+
+_snapshot_cache: dict[str, Any] = {
+    "snapshot": None,
+    "expires_at": datetime(1970, 1, 1, tzinfo=timezone.utc),
+}
+_sofascore_fixture_cache: dict[str, dict[str, Any]] = {}
+_sofascore_season_cache: dict[str, dict[str, Any]] = {}
+_understat_fixture_cache: dict[str, dict[str, Any]] = {}
+
+# ── Fixture request deduplication ──────────────────────────────────────
+_fixture_inflight_locks: dict[str, Lock] = {}
+_fixture_inflight_meta_lock = Lock()
+
+
+def _get_fixture_lock(league_id: str) -> Lock:
+    """Return a per-league lock so concurrent requests for the same league
+    wait for the first request to finish instead of duplicating work."""
+    with _fixture_inflight_meta_lock:
+        if league_id not in _fixture_inflight_locks:
+            _fixture_inflight_locks[league_id] = Lock()
+        return _fixture_inflight_locks[league_id]
+
+
+# ── File-based fixture cache (persists across server restarts) ─────────
+FIXTURE_FILE_CACHE_TTL_SECONDS = 600  # 10 minutes
+
+
+def _fixture_file_cache_path(league_id: str) -> Path:
+    return FIXTURE_CACHE_DIR / f"fixtures_{league_id}.json"
+
+
+def _load_fixture_file_cache(league_id: str) -> list[dict[str, Any]] | None:
+    """Return cached fixture dicts if the file exists and is fresh, else None."""
+    path = _fixture_file_cache_path(league_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = datetime.fromisoformat(data.get("saved_at", ""))
+        if (datetime.now(timezone.utc) - saved_at).total_seconds() > FIXTURE_FILE_CACHE_TTL_SECONDS:
+            return None
+        return data.get("fixtures", [])
+    except Exception:
+        return None
+
+
+def _save_fixture_file_cache(league_id: str, rows: list["FixtureRow"]) -> None:
+    """Persist fixture rows to disk for cross-restart caching."""
+    try:
+        FIXTURE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "fixtures": [
+                {
+                    "match_id": r.match_id,
+                    "league_id": r.league_id,
+                    "gameweek": r.gameweek,
+                    "kickoff": r.kickoff,
+                    "home_team_id": r.home_team_id,
+                    "away_team_id": r.away_team_id,
+                    "home_team_name": r.home_team_name,
+                    "away_team_name": r.away_team_name,
+                    "home_team_short_name": r.home_team_short_name,
+                    "away_team_short_name": r.away_team_short_name,
+                    "home_team_score": r.home_team_score,
+                    "away_team_score": r.away_team_score,
+                    "finished": r.finished,
+                }
+                for r in rows
+            ],
+        }
+        path = _fixture_file_cache_path(league_id)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass  # best-effort; never crash on cache write failure
+
+
+def _fixture_dicts_to_rows(dicts: list[dict[str, Any]]) -> list["FixtureRow"]:
+    """Convert file-cache dicts back to FixtureRow objects."""
+    rows = []
+    for d in dicts:
+        rows.append(FixtureRow(
+            match_id=d["match_id"],
+            league_id=d.get("league_id", ""),
+            gameweek=d.get("gameweek", 0),
+            kickoff=d.get("kickoff", ""),
+            home_team_id=d.get("home_team_id", 0),
+            away_team_id=d.get("away_team_id", 0),
+            home_team_name=d.get("home_team_name", ""),
+            away_team_name=d.get("away_team_name", ""),
+            home_team_short_name=d.get("home_team_short_name", d.get("home_team_name", "")),
+            away_team_short_name=d.get("away_team_short_name", d.get("away_team_name", "")),
+            home_team_score=d.get("home_team_score"),
+            away_team_score=d.get("away_team_score"),
+            finished=d.get("finished", False),
+        ))
+    return rows
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_opt_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return None
+        number = float(value)
+        unit = "ms" if abs(number) >= 1e12 else "s"
+        parsed = pd.to_datetime(number, unit=unit, utc=True, errors="coerce")
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        parsed = pd.NaT
+        try:
+            number = float(text)
+            if pd.notna(number):
+                unit = "ms" if abs(number) >= 1e12 else "s"
+                parsed = pd.to_datetime(number, unit=unit, utc=True, errors="coerce")
+        except (TypeError, ValueError):
+            pass
+        if pd.isna(parsed):
+            parsed = pd.to_datetime(text, utc=True, errors="coerce")
+
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime()
+
+
+def _current_season_label(reference_time: datetime | None = None) -> str:
+    now = reference_time or datetime.now(timezone.utc)
+    start_year = now.year if now.month >= 7 else now.year - 1
+    end_year = start_year + 1
+    return f"{start_year % 100:02d}/{end_year % 100:02d}"
+
+
+def _is_sofascore_event_finished(event: dict[str, Any]) -> bool:
+    status = event.get("status")
+    if isinstance(status, dict):
+        status_type = str(status.get("type", "")).strip().lower()
+        if status_type in {"notstarted", "inprogress"}:
+            return False
+        if status_type in {"finished", "canceled", "postponed"}:
+            return True
+
+    home_score = event.get("homeScore")
+    away_score = event.get("awayScore")
+    home_normaltime = _safe_opt_int((home_score or {}).get("normaltime") if isinstance(home_score, dict) else None)
+    away_normaltime = _safe_opt_int((away_score or {}).get("normaltime") if isinstance(away_score, dict) else None)
+    return home_normaltime is not None and away_normaltime is not None
+
+
+def _is_sofascore_event_inprogress(event: dict[str, Any]) -> bool:
+    status = event.get("status")
+    if not isinstance(status, dict):
+        return False
+    return str(status.get("type", "")).strip().lower() == "inprogress"
+
+
+def _sofascore_event_to_fixture_row(event: dict[str, Any], league_id: str) -> FixtureRow | None:
+    match_id = _safe_int(event.get("id"), 0)
+    if match_id <= 0:
+        return None
+
+    round_info = event.get("roundInfo")
+    if not isinstance(round_info, dict):
+        round_info = {}
+
+    kickoff_dt = _parse_utc_datetime(event.get("startTimestamp"))
+    if kickoff_dt is None:
+        kickoff_dt = _parse_utc_datetime(event.get("startDate") or event.get("date") or event.get("time"))
+    kickoff = kickoff_dt.isoformat().replace("+00:00", "Z") if kickoff_dt else ""
+
+    home_team = event.get("homeTeam")
+    away_team = event.get("awayTeam")
+    if not isinstance(home_team, dict):
+        home_team = {}
+    if not isinstance(away_team, dict):
+        away_team = {}
+
+    home_score = event.get("homeScore")
+    away_score = event.get("awayScore")
+    if not isinstance(home_score, dict):
+        home_score = {}
+    if not isinstance(away_score, dict):
+        away_score = {}
+
+    return FixtureRow(
+        match_id=match_id,
+        league_id=league_id,
+        gameweek=_safe_int(round_info.get("round"), 0),
+        kickoff=kickoff,
+        home_team_id=_safe_int(home_team.get("id"), 0),
+        away_team_id=_safe_int(away_team.get("id"), 0),
+        home_team_name=_format_team_name(str(home_team.get("name", ""))),
+        away_team_name=_format_team_name(str(away_team.get("name", ""))),
+        home_team_short_name=_format_team_name(str(home_team.get("shortName", home_team.get("name", "")))),
+        away_team_short_name=_format_team_name(str(away_team.get("shortName", away_team.get("name", "")))),
+        home_team_score=_safe_opt_int(home_score.get("normaltime")),
+        away_team_score=_safe_opt_int(away_score.get("normaltime")),
+        finished=_is_sofascore_event_finished(event),
+    )
+
+
+def _resolve_sofascore_season_context(league_name: str, season_label: str) -> tuple[int, int] | None:
+    try:
+        import ScraperFC as sfc
+        from ScraperFC.sofascore import comps
+    except ImportError:
+        return None
+
+    cache_key = f"{league_name}:{season_label}"
+    cached = _sofascore_season_cache.get(cache_key)
+    now = datetime.now(timezone.utc)
+    if isinstance(cached, dict) and now < cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc)):
+        tournament_id = _safe_int(cached.get("tournament_id"), 0)
+        season_id = _safe_int(cached.get("season_id"), 0)
+        if tournament_id > 0 and season_id > 0:
+            return tournament_id, season_id
+
+    if league_name not in comps:
+        return None
+
+    tournament_id = _safe_int(comps[league_name].get("SOFASCORE"), 0)
+    if tournament_id <= 0:
+        return None
+
+    ss = sfc.Sofascore()
+    valid_seasons = ss.get_valid_seasons(league_name)
+    season_id = _safe_int(valid_seasons.get(season_label), 0)
+    if season_id <= 0:
+        if not valid_seasons:
+            return None
+        latest_label = sorted(valid_seasons.keys())[-1]
+        season_id = _safe_int(valid_seasons[latest_label], 0)
+    if season_id <= 0:
+        return None
+
+    _sofascore_season_cache[cache_key] = {
+        "tournament_id": tournament_id,
+        "season_id": season_id,
+        "expires_at": now + timedelta(hours=6),
+    }
+    return tournament_id, season_id
+
+
+def _fetch_sofascore_events(
+    tournament_id: int,
+    season_id: int,
+    direction: str,
+    max_pages: int = 1,
+) -> list[dict[str, Any]]:
+    try:
+        from ScraperFC.sofascore import API_PREFIX
+        from ScraperFC.utils import botasaurus_browser_get_json
+    except ImportError:
+        return []
+
+    if direction not in {"last", "next"}:
+        return []
+    if tournament_id <= 0 or season_id <= 0:
+        return []
+
+    events: list[dict[str, Any]] = []
+    for page in range(max(1, int(max_pages))):
+        url = (
+            f"{API_PREFIX}/unique-tournament/{tournament_id}/"
+            f"season/{season_id}/events/{direction}/{page}"
+        )
+        payload = botasaurus_browser_get_json(url)
+        page_events = payload.get("events") if isinstance(payload, dict) else None
+        if not page_events:
+            break
+        events.extend(e for e in page_events if isinstance(e, dict))
+
+    return events
+
+
+def _get_live_sofascore_league_fixtures(
+    league_id: str,
+    reference_time: datetime | None = None,
+) -> list[FixtureRow]:
+    league_name = SOFASCORE_LEAGUE_NAME_BY_ID.get(league_id)
+    if not league_name:
+        return []
+
+    # Fast path: in-memory cache hit (no lock needed).
+    now = datetime.now(timezone.utc)
+    cached = _sofascore_fixture_cache.get(league_id)
+    cached_expires_at = (
+        cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+        if isinstance(cached, dict)
+        else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+    if isinstance(cached, dict) and now < cached_expires_at:
+        return list(cached.get("fixtures", []))
+
+    # Dedup: if another thread is already fetching this league, wait for it.
+    lock = _get_fixture_lock(league_id)
+    with lock:
+        # Re-check in-memory cache (another thread may have populated it).
+        now = datetime.now(timezone.utc)
+        cached = _sofascore_fixture_cache.get(league_id)
+        cached_expires_at = (
+            cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+            if isinstance(cached, dict)
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
+        if isinstance(cached, dict) and now < cached_expires_at:
+            return list(cached.get("fixtures", []))
+
+        try:
+            season_label = _current_season_label(reference_time or now)
+            season_context = _resolve_sofascore_season_context(
+                league_name=league_name,
+                season_label=season_label,
+            )
+            if season_context is None:
+                # Fall back to file cache on failure.
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+            tournament_id, season_id = season_context
+
+            try:
+                next_events = _fetch_sofascore_events(
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                    direction="next",
+                    max_pages=1,
+                )
+                last_events = _fetch_sofascore_events(
+                    tournament_id=tournament_id,
+                    season_id=season_id,
+                    direction="last",
+                    max_pages=1,
+                )
+            except Exception:
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+            by_match_id: dict[int, dict[str, Any]] = {}
+            for event in last_events:
+                if not _is_sofascore_event_inprogress(event):
+                    continue
+                match_id = _safe_int(event.get("id"), 0)
+                if match_id > 0:
+                    by_match_id[match_id] = event
+            for event in next_events:
+                match_id = _safe_int(event.get("id"), 0)
+                if match_id > 0:
+                    by_match_id[match_id] = event
+
+            rows = [
+                row
+                for row in (
+                    _sofascore_event_to_fixture_row(event, league_id=league_id)
+                    for event in by_match_id.values()
+                )
+                if row is not None
+            ]
+
+            rows.sort(
+                key=lambda row: (
+                    _parse_utc_datetime(row.kickoff) is None,
+                    _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
+                    row.gameweek,
+                    row.home_team_name,
+                )
+            )
+
+            _sofascore_fixture_cache[league_id] = {
+                "fixtures": rows,
+                "expires_at": now + timedelta(seconds=SOFASCORE_FIXTURE_CACHE_TTL_SECONDS),
+            }
+            _save_fixture_file_cache(league_id, rows)
+            return rows
+        except Exception:
+            file_cached = _load_fixture_file_cache(league_id)
+            return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+
+def _get_local_matches_json_league_fixtures(
+    league_id: str,
+    reference_time: datetime | None = None,
+) -> list[FixtureRow]:
+    if not league_id:
+        return []
+
+    matches_json_path = LEAGUES_DIR / str(league_id) / "matches_data.json"
+    if not matches_json_path.exists():
+        return []
+
+    try:
+        payload = json.loads(matches_json_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    rows = [
+        row
+        for row in (
+            _sofascore_event_to_fixture_row(event, league_id=league_id)
+            for event in payload
+            if isinstance(event, dict)
+        )
+        if row is not None
+    ]
+    if not rows:
+        return []
+
+    return _upcoming_or_live_fixtures(rows, reference_time or datetime.now(timezone.utc))
+
+
+def _lookup_cached_live_fixture(match_id: int) -> FixtureRow | None:
+    for cache in (_sofascore_fixture_cache, _understat_fixture_cache):
+        for entry in cache.values():
+            fixtures = entry.get("fixtures", []) if isinstance(entry, dict) else []
+            for fixture in fixtures:
+                if fixture.match_id == match_id:
+                    return fixture
+    return None
+
+
+def _understat_season_year(reference_time: datetime | None = None) -> str:
+    now = reference_time or datetime.now(timezone.utc)
+    start_year = now.year if now.month >= 7 else now.year - 1
+    return str(start_year)
+
+
+def _understat_json(url: str, referer: str) -> Any:
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": referer,
+        },
+    )
+    with urlopen(req, timeout=FPL_REQUEST_TIMEOUT_SECONDS) as response:
+        raw = response.read()
+        content_encoding = str(response.headers.get("Content-Encoding", "")).lower()
+
+    if "gzip" in content_encoding or raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    text = raw.decode("utf-8-sig", errors="replace")
+    return json.loads(text)
+
+
+@lru_cache(maxsize=8)
+def _league_team_id_lookup(league_id: str) -> dict[str, int]:
+    resolved_league_id = str(league_id or "").strip()
+    if not resolved_league_id:
+        return {}
+
+    raw_df = _load_raw_df()
+    if "league_slug" not in raw_df.columns:
+        return {}
+
+    scoped_df = raw_df[raw_df["league_slug"].astype(str) == resolved_league_id]
+    if scoped_df.empty:
+        return {}
+
+    mapping: dict[str, int] = {}
+    for team_col, id_col in (("home_team", "home_team_id"), ("away_team", "away_team_id")):
+        if team_col not in scoped_df.columns or id_col not in scoped_df.columns:
+            continue
+        for team_name, team_id in zip(scoped_df[team_col].tolist(), scoped_df[id_col].tolist()):
+            normalized = _normalize_team_name(team_name)
+            parsed_id = _safe_int(team_id, 0)
+            if normalized and parsed_id > 0 and normalized not in mapping:
+                mapping[normalized] = parsed_id
+    return mapping
+
+
+def _resolve_league_team_id(league_id: str, team_name: str, fallback_team_id: int = 0) -> int:
+    mapped_ids = _candidate_team_ids(0, team_name)
+    if mapped_ids:
+        return int(mapped_ids[0])
+
+    normalized_name = _normalize_team_name(team_name)
+    league_lookup = _league_team_id_lookup(league_id)
+    if normalized_name in league_lookup:
+        return int(league_lookup[normalized_name])
+
+    if normalized_name and league_lookup:
+        closest = difflib.get_close_matches(normalized_name, list(league_lookup.keys()), n=1, cutoff=0.72)
+        if closest:
+            return int(league_lookup[closest[0]])
+
+    return int(fallback_team_id) if fallback_team_id > 0 else 0
+
+
+def _understat_event_to_fixture_row(event: dict[str, Any], league_id: str) -> FixtureRow | None:
+    if not isinstance(event, dict):
+        return None
+
+    home_team = event.get("h") if isinstance(event.get("h"), dict) else {}
+    away_team = event.get("a") if isinstance(event.get("a"), dict) else {}
+    home_name = str(home_team.get("title", "")).strip()
+    away_name = str(away_team.get("title", "")).strip()
+    if not home_name or not away_name:
+        return None
+
+    kickoff_dt = _parse_utc_datetime(event.get("datetime"))
+    kickoff = kickoff_dt.isoformat().replace("+00:00", "Z") if kickoff_dt else ""
+    gameweek = int(kickoff_dt.isocalendar().week) if kickoff_dt else 0
+
+    provider_match_id = _safe_int(event.get("id"), 0)
+    match_offset = UNDERSTAT_MATCH_ID_OFFSET_BY_LEAGUE.get(league_id, 7_000_000_000)
+    if provider_match_id > 0:
+        match_id = match_offset + provider_match_id
+    else:
+        seed = f"{league_id}:{home_name}:{away_name}:{kickoff}".encode("utf-8", errors="ignore")
+        match_id = match_offset + int(zlib.crc32(seed) & 0xFFFFFFFF)
+
+    goals = event.get("goals") if isinstance(event.get("goals"), dict) else {}
+    finished = bool(event.get("isResult"))
+    home_score = _safe_opt_int(goals.get("h")) if finished else None
+    away_score = _safe_opt_int(goals.get("a")) if finished else None
+
+    home_team_id = _resolve_league_team_id(league_id, home_name, fallback_team_id=0)
+    away_team_id = _resolve_league_team_id(league_id, away_name, fallback_team_id=0)
+
+    return FixtureRow(
+        match_id=match_id,
+        league_id=league_id,
+        gameweek=gameweek,
+        kickoff=kickoff,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        home_team_name=home_name,
+        away_team_name=away_name,
+        home_team_short_name=home_name,
+        away_team_short_name=away_name,
+        home_team_score=home_score,
+        away_team_score=away_score,
+        finished=finished,
+    )
+
+
+def _get_understat_league_fixtures(
+    league_id: str,
+    reference_time: datetime | None = None,
+) -> list[FixtureRow]:
+    league_name = UNDERSTAT_LEAGUE_NAME_BY_ID.get(league_id)
+    if not league_name:
+        return []
+
+    # Fast path: in-memory cache hit.
+    now = datetime.now(timezone.utc)
+    cached = _understat_fixture_cache.get(league_id)
+    cached_expires_at = (
+        cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+        if isinstance(cached, dict)
+        else datetime(1970, 1, 1, tzinfo=timezone.utc)
+    )
+    if isinstance(cached, dict) and now < cached_expires_at:
+        cached_rows = cached.get("fixtures", [])
+        if isinstance(cached_rows, list):
+            return _upcoming_or_live_fixtures(cached_rows, reference_time or now)
+
+    # Dedup: serialize concurrent requests for the same league.
+    lock = _get_fixture_lock(f"understat_{league_id}")
+    with lock:
+        # Re-check after acquiring lock.
+        now = datetime.now(timezone.utc)
+        cached = _understat_fixture_cache.get(league_id)
+        cached_expires_at = (
+            cached.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+            if isinstance(cached, dict)
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        )
+        if isinstance(cached, dict) and now < cached_expires_at:
+            cached_rows = cached.get("fixtures", [])
+            if isinstance(cached_rows, list):
+                return _upcoming_or_live_fixtures(cached_rows, reference_time or now)
+
+        try:
+            season_year = _understat_season_year(reference_time or now)
+            season_candidates = [season_year]
+            try:
+                season_candidates.append(str(int(season_year) - 1))
+            except Exception:
+                pass
+
+            rows: list[FixtureRow] = []
+            for season in season_candidates:
+                league_segment = quote(league_name, safe="")
+                referer_segment = quote(league_name.replace(" ", "_"), safe="_")
+                url = f"https://understat.com/getLeagueData/{league_segment}/{season}/"
+                referer = f"https://understat.com/league/{referer_segment}/{season}"
+                payload = _understat_json(url, referer=referer)
+                dates = payload.get("dates") if isinstance(payload, dict) else None
+                if not isinstance(dates, list):
+                    continue
+
+                rows = [
+                    row
+                    for row in (
+                        _understat_event_to_fixture_row(event, league_id=league_id)
+                        for event in dates
+                    )
+                    if row is not None
+                ]
+                if rows:
+                    break
+
+            if not rows:
+                file_cached = _load_fixture_file_cache(league_id)
+                return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+            rows = _sort_fixtures_by_kickoff(rows)
+            _understat_fixture_cache[league_id] = {
+                "fixtures": rows,
+                "expires_at": now + timedelta(seconds=UNDERSTAT_FIXTURE_CACHE_TTL_SECONDS),
+            }
+            _save_fixture_file_cache(league_id, rows)
+            return _upcoming_or_live_fixtures(rows, reference_time or now)
+        except Exception:
+            file_cached = _load_fixture_file_cache(league_id)
+            return _fixture_dicts_to_rows(file_cached) if file_cached else []
+
+
+def _normalize_range(value: Any, default_low: float = 0.0, default_high: float = 10.0) -> tuple[float, float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return (default_low, default_high)
+    low = float(value[0])
+    high = float(value[1])
+    if low > high:
+        low, high = high, low
+    return (low, high)
+
+
+_raw_df_cache: dict[str, Any] = {"df": None, "ts": 0.0}
+_RAW_DF_TTL = 300  # seconds – refresh CSV data every 5 minutes
+
+# ---------------------------------------------------------------------------
+# Server-side workspace response cache
+# Caches full JSON-ready dicts keyed by (endpoint, match_id, filters_hash).
+# Avoids re-running evidence retrieval + recent_matches construction.
+# ---------------------------------------------------------------------------
+_workspace_response_cache: dict[str, tuple[float, dict]] = {}  # key -> (ts, response_dict)
+_WORKSPACE_RESPONSE_TTL = 300  # seconds – aligned with raw data TTL
+_WORKSPACE_RESPONSE_MAX_ENTRIES = 256
+
+
+def _workspace_cache_key(endpoint: str, payload: dict) -> str:
+    """Build a deterministic cache key from the endpoint name and request payload."""
+    import hashlib
+    # Include all fields that affect the response
+    key_parts = [
+        endpoint,
+        str(payload.get("match_id", "")),
+        str(payload.get("home_team_id", "")),
+        str(payload.get("away_team_id", "")),
+        str(payload.get("line", "")),
+        json.dumps(payload.get("filters", {}), sort_keys=True),
+        json.dumps(payload.get("evidenceFilters", []), sort_keys=True),
+    ]
+    raw = "|".join(key_parts)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _get_cached_workspace(key: str) -> dict | None:
+    """Return cached response if still valid, else None."""
+    entry = _workspace_response_cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    if (monotonic() - ts) < _WORKSPACE_RESPONSE_TTL:
+        return data
+    del _workspace_response_cache[key]
+    return None
+
+
+def _set_cached_workspace(key: str, data: dict) -> None:
+    """Store a workspace response in cache, evicting oldest if full."""
+    if len(_workspace_response_cache) >= _WORKSPACE_RESPONSE_MAX_ENTRIES:
+        # Evict oldest entry
+        oldest_key = min(_workspace_response_cache, key=lambda k: _workspace_response_cache[k][0])
+        del _workspace_response_cache[oldest_key]
+    _workspace_response_cache[key] = (monotonic(), data)
+
+def _extract_penalty_goals(series: pd.Series) -> pd.Series:
+    """Vectorized extraction of penalty_goals from shot payload strings."""
+    def _parse_one(raw):
+        if isinstance(raw, dict):
+            return int(raw.get("penalty_goals", 0))
+        if isinstance(raw, str):
+            text = raw.strip()
+            if text:
+                try:
+                    payload = json.loads(text)
+                    if isinstance(payload, dict):
+                        return int(payload.get("penalty_goals", 0))
+                except Exception:
+                    pass
+        return 0
+    return series.map(_parse_one, na_action="ignore").fillna(0).astype(int)
+
+def _load_raw_df() -> pd.DataFrame:
+    """Load and concatenate season data from MongoDB or local CSV files.
+
+    Tries MongoDB first (via MONGODB_URI), falls back to local CSV files.
+    Results are cached in memory and refreshed every _RAW_DF_TTL seconds.
+    """
+    now = monotonic()
+    if _raw_df_cache["df"] is not None and (now - _raw_df_cache["ts"]) < _RAW_DF_TTL:
+        return _raw_df_cache["df"]
+
+    raw_df = None
+
+    # Try MongoDB first
+    col = get_collection("season_matches")
+    if col is not None:
+        try:
+            docs = list(col.find({}, {"_id": 0}))
+            if docs:
+                raw_df = pd.DataFrame(docs)
+        except Exception:
+            raw_df = None
+
+    # Fallback to local CSV files
+    if raw_df is None:
+        frames: list[pd.DataFrame] = []
+
+        if LEAGUES_DIR.exists():
+            for league_dir in sorted(LEAGUES_DIR.iterdir()):
+                csv_path = league_dir / "season_df.csv"
+                if csv_path.exists():
+                    df = pd.read_csv(csv_path)
+                    df["league_slug"] = league_dir.name
+                    frames.append(df)
+
+        if not frames:
+            data_path = PRIMARY_SEASON_DATA_PATH if PRIMARY_SEASON_DATA_PATH.exists() else LEGACY_SEASON_DATA_PATH
+            if not data_path.exists():
+                raise FileNotFoundError(
+                    f"No league data found in {LEAGUES_DIR} and no fallback at {PRIMARY_SEASON_DATA_PATH}"
+                )
+            df = pd.read_csv(data_path)
+            df["league_slug"] = "england_premier_league"
+            frames.append(df)
+
+        raw_df = pd.concat(frames, ignore_index=True)
+    if "match_id" not in raw_df.columns and "game_id" in raw_df.columns:
+        raw_df = raw_df.rename(columns={"game_id": "match_id"})
+
+    # Extract penalty goal counts from shot payloads for NPG support (vectorized)
+    for side in ("home", "away"):
+        shots_col = f"{side}_shots"
+        pg_col = f"penalty_goals_{side}"
+        if shots_col in raw_df.columns and pg_col not in raw_df.columns:
+            raw_df[pg_col] = _extract_penalty_goals(raw_df[shots_col])
+        elif pg_col not in raw_df.columns:
+            raw_df[pg_col] = 0
+
+    raw_df["penalty_goals_home"] = pd.to_numeric(raw_df["penalty_goals_home"], errors="coerce").fillna(0).astype(int)
+    raw_df["penalty_goals_away"] = pd.to_numeric(raw_df["penalty_goals_away"], errors="coerce").fillna(0).astype(int)
+    if "total_penalty_goals" not in raw_df.columns:
+        raw_df["total_penalty_goals"] = raw_df["penalty_goals_home"] + raw_df["penalty_goals_away"]
+
+    # Pre-sort by match_id descending so anchor lookups can skip per-query sorts
+    raw_df = raw_df.sort_values("match_id", ascending=False, ignore_index=True)
+    _raw_df_cache["df"] = raw_df
+    _raw_df_cache["ts"] = now
+    return raw_df
+
+
+_store_cache: dict[str, Any] = {"store": None, "ts": 0.0}
+_STORE_TTL = 300  # seconds – aligned with _RAW_DF_TTL
+
+def _build_store() -> AnalyticsStore:
+    now = monotonic()
+    if _store_cache["store"] is not None and (now - _store_cache["ts"]) < _STORE_TTL:
+        return _store_cache["store"]
+
+    raw_df = _load_raw_df()
+    builder = MatchAnalyticsBuilder()
+    analytics = [
+        builder.build(match_df.copy())
+        for _, match_df in raw_df.groupby("match_id", sort=False)
+    ]
+
+    store = AnalyticsStore()
+    store.ingest(analytics)
+    _store_cache["store"] = store
+    _store_cache["ts"] = now
+    return store
+
+
+def _format_team_name(raw: str) -> str:
+    return raw.replace("_", " ").title()
+
+
+def _normalize_team_name(value: str) -> str:
+    compact = re.sub(r"[^a-z0-9]", "", str(value).lower())
+    return TEAM_NAME_ALIASES.get(compact, compact)
+
+
+def _http_json(url: str) -> Any:
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=FPL_REQUEST_TIMEOUT_SECONDS) as response:
+        return json.load(response)
+
+
+def _current_gameweek_from_events(events: list[dict[str, Any]]) -> int:
+    current = next((e for e in events if e.get("is_current")), None)
+    if current:
+        return int(current["id"])
+
+    nxt = next((e for e in events if e.get("is_next")), None)
+    if nxt:
+        return int(nxt["id"])
+
+    finished = [int(e["id"]) for e in events if e.get("finished")]
+    if finished:
+        return max(finished)
+    return 1
+
+
+def _fetch_live_fixture_snapshot() -> FixtureSnapshot:
+    bootstrap = _http_json(FPL_BOOTSTRAP_URL)
+    fixtures = _http_json(FPL_FIXTURES_URL)
+
+    team_map = {int(t["id"]): t["name"] for t in bootstrap.get("teams", [])}
+    current_gameweek = _current_gameweek_from_events(bootstrap.get("events", []))
+
+    rows: list[FixtureRow] = []
+    for item in fixtures:
+        gameweek = _safe_int(item.get("event"), 0)
+        if gameweek <= 0:
+            continue
+
+        home_team_id = _safe_int(item.get("team_h"), 0)
+        away_team_id = _safe_int(item.get("team_a"), 0)
+        rows.append(
+            FixtureRow(
+                match_id=_safe_int(item.get("id"), 0),
+                league_id="england_premier_league",
+                gameweek=gameweek,
+                kickoff=item.get("kickoff_time") or "",
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                home_team_name=team_map.get(home_team_id, f"Team {home_team_id}"),
+                away_team_name=team_map.get(away_team_id, f"Team {away_team_id}"),
+                home_team_short_name=team_map.get(home_team_id, f"Team {home_team_id}"),
+                away_team_short_name=team_map.get(away_team_id, f"Team {away_team_id}"),
+                home_team_score=_safe_opt_int(item.get("team_h_score")),
+                away_team_score=_safe_opt_int(item.get("team_a_score")),
+                finished=bool(item.get("finished", False)),
+            )
+        )
+
+    rows.sort(key=lambda r: (r.gameweek, r.kickoff or "9999-12-31T00:00:00Z", r.home_team_name))
+    snapshot = FixtureSnapshot(
+        fixtures=rows,
+        current_gameweek=current_gameweek,
+        updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        source="live_fpl",
+    )
+    _write_fixture_csv(rows)
+    return snapshot
+
+
+def _write_fixture_csv(rows: list[FixtureRow]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "gameweek",
+        "kickoff_time",
+        "home_team",
+        "away_team",
+        "home_team_score",
+        "away_team_score",
+        "finished",
+        "fixture_id",
+        "league_id",
+        "home_team_id",
+        "away_team_id",
+    ]
+    with FIXTURE_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(
+                {
+                    "gameweek": r.gameweek,
+                    "kickoff_time": r.kickoff,
+                    "home_team": r.home_team_name,
+                    "away_team": r.away_team_name,
+                    "home_team_score": "" if r.home_team_score is None else r.home_team_score,
+                    "away_team_score": "" if r.away_team_score is None else r.away_team_score,
+                    "finished": r.finished,
+                    "fixture_id": r.match_id,
+                    "league_id": r.league_id,
+                    "home_team_id": r.home_team_id,
+                    "away_team_id": r.away_team_id,
+                }
+            )
+
+
+def _load_fixture_csv_snapshot() -> FixtureSnapshot | None:
+    if not FIXTURE_CSV_PATH.exists():
+        return None
+
+    rows: list[FixtureRow] = []
+    with FIXTURE_CSV_PATH.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for item in reader:
+            rows.append(
+                FixtureRow(
+                    match_id=_safe_int(item.get("fixture_id"), 0),
+                    league_id=item.get("league_id") or "england_premier_league",
+                    gameweek=_safe_int(item.get("gameweek"), 0),
+                    kickoff=item.get("kickoff_time") or "",
+                    home_team_id=_safe_int(item.get("home_team_id"), 0),
+                    away_team_id=_safe_int(item.get("away_team_id"), 0),
+                    home_team_name=item.get("home_team") or "",
+                    away_team_name=item.get("away_team") or "",
+                    home_team_short_name=item.get("home_team_short") or item.get("home_team") or "",
+                    away_team_short_name=item.get("away_team_short") or item.get("away_team") or "",
+                    home_team_score=_safe_opt_int(item.get("home_team_score")),
+                    away_team_score=_safe_opt_int(item.get("away_team_score")),
+                    finished=str(item.get("finished", "False")).lower() == "true",
+                )
+            )
+
+    if not rows:
+        return None
+
+    return FixtureSnapshot(
+        fixtures=rows,
+        current_gameweek=_infer_gameweek(rows),
+        updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        source="csv_cache",
+    )
+
+
+@lru_cache(maxsize=8)
+def _historical_fixture_snapshot() -> FixtureSnapshot:
+    raw_df = _load_raw_df()
+    needed_cols = ["match_id", "home_team_id", "away_team_id", "home_team", "away_team"]
+    if "league_slug" in raw_df.columns:
+        needed_cols.append("league_slug")
+    if "match_datetime" in raw_df.columns:
+        needed_cols.append("match_datetime")
+
+    fixture_df = (
+        raw_df[needed_cols]
+        .drop_duplicates(subset=["match_id"])
+    )
+
+    # Sort by match_datetime descending (most recent first)
+    if "match_datetime" in fixture_df.columns:
+        fixture_df["_sort_dt"] = pd.to_datetime(fixture_df["match_datetime"], utc=True, errors="coerce")
+        fixture_df = fixture_df.sort_values(by="_sort_dt", ascending=False, na_position="last")
+        fixture_df = fixture_df.drop(columns=["_sort_dt"])
+    else:
+        fixture_df = fixture_df.sort_values(by="match_id", ascending=False)
+    fixture_df = fixture_df.reset_index(drop=True)
+
+    has_datetime = "match_datetime" in fixture_df.columns
+    has_league = "league_slug" in fixture_df.columns
+    rows: list[FixtureRow] = []
+    for t in fixture_df.itertuples(index=False):
+        league_id = str(getattr(t, "league_slug", "england_premier_league")) if has_league else "england_premier_league"
+
+        kickoff_str = ""
+        if has_datetime:
+            try:
+                kickoff_str = pd.Timestamp(t.match_datetime).isoformat().replace("+00:00", "Z")
+            except Exception:
+                kickoff_str = ""
+
+        rows.append(
+            FixtureRow(
+                match_id=int(t.match_id),
+                league_id=league_id,
+                gameweek=0,
+                kickoff=kickoff_str,
+                home_team_id=int(t.home_team_id),
+                away_team_id=int(t.away_team_id),
+                home_team_name=_format_team_name(str(t.home_team)),
+                away_team_name=_format_team_name(str(t.away_team)),
+                home_team_short_name=_format_team_name(str(t.home_team)),
+                away_team_short_name=_format_team_name(str(t.away_team)),
+                home_team_score=None,
+                away_team_score=None,
+                finished=True,
+            )
+        )
+
+    return FixtureSnapshot(
+        fixtures=rows,
+        current_gameweek=0,
+        updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        source="historical_fallback",
+    )
+
+
+@lru_cache(maxsize=8)
+def _historical_fixture_index() -> dict[int, FixtureRow]:
+    return {fixture.match_id: fixture for fixture in _historical_fixture_snapshot().fixtures}
+
+
+def _resolve_fixture_for_match(snapshot: FixtureSnapshot | None, match_id: int) -> FixtureRow | None:
+    if match_id <= 0:
+        return None
+
+    # Prefer live non-EPL cache first so workspace requests stay aligned with
+    # fixtures returned by `/api/fixtures` for non-Premier League leagues.
+    fixture = _lookup_cached_live_fixture(match_id)
+    if fixture is not None:
+        return fixture
+
+    if snapshot is not None:
+        fixture = next((f for f in snapshot.fixtures if f.match_id == match_id), None)
+        if fixture is not None:
+            return fixture
+
+    return _historical_fixture_index().get(match_id)
+
+
+def _infer_gameweek(rows: list[FixtureRow]) -> int:
+    active = sorted({r.gameweek for r in rows if r.gameweek > 0 and not r.finished})
+    if active:
+        return active[0]
+    known = [r.gameweek for r in rows if r.gameweek > 0]
+    if known:
+        return max(known)
+    return 1
+
+
+@lru_cache(maxsize=1)
+def _raw_team_name_index() -> dict[str, tuple[int, ...]]:
+    raw_df = _load_raw_df()
+    mapping: dict[str, set[int]] = {}
+
+    for t in raw_df.itertuples(index=False):
+        home_key = _normalize_team_name(str(t.home_team))
+        away_key = _normalize_team_name(str(t.away_team))
+        mapping.setdefault(home_key, set()).add(int(t.home_team_id))
+        mapping.setdefault(away_key, set()).add(int(t.away_team_id))
+
+    return {k: tuple(sorted(v)) for k, v in mapping.items()}
+
+
+def _candidate_team_ids(team_id: int, team_name: str | None) -> list[int]:
+    # Live fixture provider IDs can differ from local analytics IDs.
+    # Prefer name-mapped local IDs first, then fallback to provided numeric ID.
+    mapped_ids: list[int] = []
+    if team_name:
+        team_key = _normalize_team_name(team_name)
+        mapped_ids = list(_raw_team_name_index().get(team_key, ()))
+
+    if mapped_ids:
+        return mapped_ids
+
+    if team_id > 0:
+        return [team_id]
+
+    return []
+
+
+def _merge_historical_for_other_leagues(snapshot: FixtureSnapshot) -> FixtureSnapshot:
+    """Merge historical fixtures for non-EPL leagues into a snapshot that only has EPL."""
+    existing_ids = {f.match_id for f in snapshot.fixtures}
+    historical = _historical_fixture_snapshot()
+    extra = [
+        f for f in historical.fixtures
+        if f.league_id != "england_premier_league" and f.match_id not in existing_ids
+    ]
+    if extra:
+        merged_fixtures = list(snapshot.fixtures) + extra
+        return FixtureSnapshot(
+            fixtures=merged_fixtures,
+            current_gameweek=snapshot.current_gameweek,
+            updated_at=snapshot.updated_at,
+            source=snapshot.source,
+        )
+    return snapshot
+
+
+def _get_fixture_snapshot(force_refresh: bool = False) -> FixtureSnapshot:
+    now = datetime.now(timezone.utc)
+    cached = _snapshot_cache.get("snapshot")
+    expires_at = _snapshot_cache.get("expires_at", datetime(1970, 1, 1, tzinfo=timezone.utc))
+
+    if cached and (not force_refresh or now < expires_at):
+        return cached
+
+    if force_refresh:
+        try:
+            snapshot = _fetch_live_fixture_snapshot()
+            snapshot = _merge_historical_for_other_leagues(snapshot)
+            _snapshot_cache["snapshot"] = snapshot
+            _snapshot_cache["expires_at"] = now + timedelta(seconds=FPL_CACHE_TTL_SECONDS)
+            return snapshot
+        except Exception:
+            pass
+
+    if cached:
+        # Non-refresh calls should not block on network.
+        return cached
+
+    csv_snapshot = _load_fixture_csv_snapshot()
+    if csv_snapshot:
+        csv_snapshot = _merge_historical_for_other_leagues(csv_snapshot)
+        _snapshot_cache["snapshot"] = csv_snapshot
+        _snapshot_cache["expires_at"] = now + timedelta(seconds=FPL_CACHE_TTL_SECONDS)
+        return csv_snapshot
+
+    historical = _historical_fixture_snapshot()
+    _snapshot_cache["snapshot"] = historical
+    _snapshot_cache["expires_at"] = now + timedelta(seconds=FPL_CACHE_TTL_SECONDS)
+    return historical
+
+
+def _get_nonblocking_fixture_snapshot() -> FixtureSnapshot:
+    """
+    Returns the best available snapshot without forcing a live network fetch.
+    Used by latency-sensitive endpoints like workspace filtering.
+    """
+    try:
+        return _get_fixture_snapshot(force_refresh=False)
+    except Exception:
+        csv_snapshot = _load_fixture_csv_snapshot()
+        if csv_snapshot:
+            return csv_snapshot
+        try:
+            return _historical_fixture_snapshot()
+        except Exception:
+            return FixtureSnapshot(
+                fixtures=[],
+                current_gameweek=0,
+                updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                source="empty_fallback",
+            )
+
+
+def _get_live_refreshed_fixture_snapshot() -> FixtureSnapshot:
+    """
+    Forces a live refresh attempt; falls back safely to cached/local snapshot.
+    """
+    try:
+        return _get_fixture_snapshot(force_refresh=True)
+    except Exception:
+        return _get_nonblocking_fixture_snapshot()
+
+
+def _select_next_up_fixtures(
+    league_fixtures: list[FixtureRow], reference_time: datetime, gameweeks_to_include: int = 2
+) -> tuple[list[FixtureRow], int, list[int], bool]:
+    if not league_fixtures:
+        return [], 0, [], False
+
+    unfinished = [f for f in league_fixtures if not f.finished]
+    if not unfinished:
+        return [], 0, [], False
+
+    kickoff_lookup = {f.match_id: _parse_utc_datetime(f.kickoff) for f in unfinished}
+    gameweeks_to_include = max(1, int(gameweeks_to_include))
+
+    def _next_gameweeks_from_anchor(anchor_gameweek: int) -> list[int]:
+        positive_gameweeks = sorted({f.gameweek for f in unfinished if f.gameweek > 0})
+        if not positive_gameweeks:
+            return [anchor_gameweek]
+
+        if anchor_gameweek not in positive_gameweeks:
+            positive_gameweeks.append(anchor_gameweek)
+            positive_gameweeks = sorted(set(positive_gameweeks))
+
+        anchor_index = positive_gameweeks.index(anchor_gameweek)
+        return positive_gameweeks[anchor_index : anchor_index + gameweeks_to_include]
+
+    def _select_by_gameweeks(gameweeks: list[int]) -> list[FixtureRow]:
+        gameweek_set = set(gameweeks)
+        selected = [f for f in unfinished if f.gameweek in gameweek_set]
+        selected.sort(
+            key=lambda row: (
+                kickoff_lookup.get(row.match_id) is None,
+                kickoff_lookup.get(row.match_id) or datetime.max.replace(tzinfo=timezone.utc),
+                row.gameweek,
+                row.home_team_name,
+            )
+        )
+        return selected
+
+    # 1) If matches are currently in progress, prioritize that gameweek.
+    ongoing = [
+        f
+        for f in unfinished
+        if kickoff_lookup.get(f.match_id) is not None and kickoff_lookup[f.match_id] <= reference_time
+    ]
+    if ongoing:
+        positive_gameweeks = [f.gameweek for f in ongoing if f.gameweek > 0]
+        target_gameweek = min(positive_gameweeks) if positive_gameweeks else ongoing[0].gameweek
+        selected_gameweeks = _next_gameweeks_from_anchor(target_gameweek)
+        selected = _select_by_gameweeks(selected_gameweeks)
+        return selected, target_gameweek, selected_gameweeks, False
+
+    # 2) Otherwise pick the earliest future kickoff and return that gameweek.
+    future = [
+        f
+        for f in unfinished
+        if kickoff_lookup.get(f.match_id) is not None and kickoff_lookup[f.match_id] >= reference_time
+    ]
+    if future:
+        first_future = min(future, key=lambda row: kickoff_lookup[row.match_id])
+        target_gameweek = first_future.gameweek
+        selected_gameweeks = _next_gameweeks_from_anchor(target_gameweek)
+        selected = _select_by_gameweeks(selected_gameweeks)
+        return selected, target_gameweek, selected_gameweeks, False
+
+    # 3) Fallback for fixtures without kickoff timestamps.
+    positive_gameweeks = [f.gameweek for f in unfinished if f.gameweek > 0]
+    target_gameweek = min(positive_gameweeks) if positive_gameweeks else unfinished[0].gameweek
+    selected_gameweeks = _next_gameweeks_from_anchor(target_gameweek)
+    selected = _select_by_gameweeks(selected_gameweeks)
+    return selected, target_gameweek, selected_gameweeks, True
+
+
+def _sort_fixtures_by_kickoff(rows: list[FixtureRow]) -> list[FixtureRow]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            _parse_utc_datetime(row.kickoff) is None,
+            _parse_utc_datetime(row.kickoff) or datetime.max.replace(tzinfo=timezone.utc),
+            row.gameweek,
+            row.home_team_name,
+        ),
+    )
+
+
+def _upcoming_or_live_fixtures(
+    rows: list[FixtureRow],
+    reference_time: datetime,
+    stale_grace_hours: int = 6,
+) -> list[FixtureRow]:
+    stale_cutoff = reference_time - timedelta(hours=max(0, int(stale_grace_hours)))
+    filtered: list[FixtureRow] = []
+    for row in rows:
+        if row.finished:
+            continue
+        kickoff_dt = _parse_utc_datetime(row.kickoff)
+        if kickoff_dt is not None and kickoff_dt < stale_cutoff:
+            continue
+        filtered.append(row)
+    return _sort_fixtures_by_kickoff(filtered)
+
+
+def _default_evidence_filters(filters_payload: dict[str, Any]) -> list[FilterSpec]:
+    specs: list[FilterSpec] = []
+
+    venue = filters_payload.get("home_away")
+    if venue in {"home", "away"}:
+        specs.append(VenueFilter.build(operator="==", value=venue))
+
+    team_range = _normalize_range(filters_payload.get("team_momentum_range"))
+    specs.append(TeamMomentumFilter.build(operator="between", value=team_range))
+
+    opp_range = _normalize_range(filters_payload.get("opponent_momentum_range"))
+    specs.append(OpponentMomentumFilter.build(operator="between", value=opp_range))
+
+    total_goals_range = _normalize_range(filters_payload.get("total_match_goals_range"), default_low=0.0, default_high=10.0)
+    specs.append(TotalMatchGoals.build(operator="between", value=total_goals_range))
+
+    team_goals_range = _normalize_range(filters_payload.get("team_goals_range"), default_low=0.0, default_high=10.0)
+    specs.append(GoalsScored.build(operator="between", value=team_goals_range))
+
+    opposition_goals_range = _normalize_range(filters_payload.get("opposition_goals_range"), default_low=0.0, default_high=10.0)
+    specs.append(GoalsConceded.build(operator="between", value=opposition_goals_range))
+
+    team_xg_range = _normalize_range(filters_payload.get("team_xg_range"), default_low=0.0, default_high=5.0)
+    specs.append(TeamXG.build(operator="between", value=team_xg_range))
+
+    opposition_xg_range = _normalize_range(filters_payload.get("opposition_xg_range"), default_low=0.0, default_high=5.0)
+    specs.append(OpponentXG.build(operator="between", value=opposition_xg_range))
+
+    total_xg_range = _normalize_range(filters_payload.get("total_xg_range"), default_low=0.0, default_high=10.0)
+    specs.append(TotalXG.build(operator="between", value=total_xg_range))
+
+    team_possession_range = _normalize_range(
+        filters_payload.get("team_possession_range"),
+        default_low=0.0,
+        default_high=100.0,
+    )
+    specs.append(TeamPossessionFilter.build(operator="between", value=team_possession_range))
+
+    opponent_possession_range = _normalize_range(
+        filters_payload.get("opposition_possession_range"),
+        default_low=0.0,
+        default_high=100.0,
+    )
+    specs.append(OpponentPossessionFilter.build(operator="between", value=opponent_possession_range))
+
+    field_tilt_range = _normalize_range(filters_payload.get("field_tilt_range"), default_low=0.0, default_high=1.0)
+    specs.append(FieldTiltFilter.build(operator="between", value=field_tilt_range))
+
+    shot_xg_threshold = _safe_float(filters_payload.get("shot_xg_threshold"), 0.0)
+    shot_xg_min_shots = _safe_int(filters_payload.get("shot_xg_min_shots"), 0)
+    if shot_xg_min_shots > 0:
+        specs.append(
+            TeamShotXGFilter.build(
+                operator=">=",
+                value={"min_xg": shot_xg_threshold, "min_shots": shot_xg_min_shots},
+            )
+        )
+
+    return specs
+
+
+def _parse_filters(payload: dict[str, Any]) -> list[FilterSpec]:
+    evidence_filters = payload.get("evidenceFilters")
+    if isinstance(evidence_filters, list):
+        return [FilterSpec.from_dict(f) for f in evidence_filters if isinstance(f, dict)]
+
+    filters_payload = payload.get("filters")
+    if isinstance(filters_payload, dict):
+        return _default_evidence_filters(filters_payload)
+
+    return _default_evidence_filters({})
+
+
+_league_table_cache: dict[str, Any] = {}  # league_id -> {"df": DataFrame, "ts": float}
+_LEAGUE_TABLE_TTL = 300  # seconds
+
+def _load_league_table(league_id: str) -> pd.DataFrame:
+    if not league_id:
+        return pd.DataFrame()
+
+    now = monotonic()
+    cached = _league_table_cache.get(league_id)
+    if cached is not None and now - cached["ts"] < _LEAGUE_TABLE_TTL:
+        return cached["df"]
+
+    result = pd.DataFrame()
+
+    # Try MongoDB first
+    col = get_collection("league_tables")
+    if col is not None:
+        try:
+            docs = list(col.find({"league_slug": str(league_id)}, {"_id": 0}))
+            if docs:
+                table_df = pd.DataFrame(docs)
+                if not table_df.empty and "team" in table_df.columns:
+                    result = table_df
+        except Exception:
+            pass
+
+    # Fallback to local CSV
+    if result.empty:
+        table_path = LEAGUES_DIR / str(league_id) / "league_table.csv"
+        if table_path.exists():
+            try:
+                table_df = pd.read_csv(table_path)
+                if not table_df.empty and "team" in table_df.columns:
+                    result = table_df
+            except Exception:
+                pass
+
+    _league_table_cache[league_id] = {"df": result, "ts": now}
+    return result
+
+
+def _normalize_rank_range(raw_value: Any, max_rank: int) -> tuple[int, int] | None:
+    if not isinstance(raw_value, (list, tuple)) or len(raw_value) != 2:
+        return None
+    try:
+        low = int(float(raw_value[0]))
+        high = int(float(raw_value[1]))
+    except (TypeError, ValueError):
+        return None
+    if low > high:
+        low, high = high, low
+    low = max(1, min(max_rank, low))
+    high = max(1, min(max_rank, high))
+    if low > high:
+        return None
+    return (low, high)
+
+
+def _parse_opponent_rank_filters(filters_payload: dict[str, Any], max_rank: int) -> dict[str, tuple[int, int]]:
+    parsed: dict[str, tuple[int, int]] = {}
+    for key in OPPONENT_RANK_FILTER_CONFIG:
+        normalized_range = _normalize_rank_range(filters_payload.get(key), max_rank=max_rank)
+        if normalized_range is not None and normalized_range != (1, max_rank):
+            parsed[key] = normalized_range
+    return parsed
+
+
+def _build_team_rank_map(table_df: pd.DataFrame, filter_key: str) -> dict[str, int]:
+    config = OPPONENT_RANK_FILTER_CONFIG.get(filter_key)
+    if not config:
+        return {}
+
+    column = str(config["table_column"])
+    if column not in table_df.columns:
+        return {}
+
+    team_series = table_df["team"].astype(str)
+    if filter_key == "opponent_rank_position_range":
+        rank_values = pd.to_numeric(table_df["rank"], errors="coerce")
+    else:
+        metric_values = pd.to_numeric(table_df[column], errors="coerce")
+        rank_values = metric_values.rank(method="min", ascending=bool(config["ascending"]))
+
+    mapping: dict[str, int] = {}
+    for team_name, rank_value in zip(team_series.tolist(), rank_values.tolist()):
+        if pd.isna(rank_value):
+            continue
+        normalized_team = _normalize_team_name(team_name)
+        if normalized_team:
+            mapping[normalized_team] = int(rank_value)
+    return mapping
+
+
+def _resolve_opponent_team_name_from_row(row: pd.Series, match_lookup: dict[int, tuple[str, str]]) -> str:
+    match_id = _safe_int(row.get("match_id"), -1)
+    home_name, away_name = match_lookup.get(match_id, ("", ""))
+    venue = str(row.get("venue", "")).strip().lower()
+    if venue == "home":
+        return away_name
+    if venue == "away":
+        return home_name
+    return ""
+
+
+def _resolve_opponent_names_vectorized(df: pd.DataFrame, match_lookup: dict[int, tuple[str, str]]) -> pd.Series:
+    """Vectorized version of opponent name resolution – avoids slow .apply(axis=1)."""
+    match_ids = df["match_id"].astype(int)
+    venues = df["venue"].astype(str).str.strip().str.lower()
+
+    home_names = match_ids.map(lambda mid: match_lookup.get(mid, ("", ""))[0])
+    away_names = match_ids.map(lambda mid: match_lookup.get(mid, ("", ""))[1])
+
+    result = pd.Series("", index=df.index)
+    result = result.where(venues != "home", away_names)
+    result = result.where(venues != "away", home_names)
+    return result
+
+
+def _apply_opponent_rank_filters(
+    df: pd.DataFrame,
+    filters_payload: dict[str, Any],
+    league_id: str | None,
+    notes: list[str] | None = None,
+    side_label: str = "team",
+) -> pd.DataFrame:
+    if df.empty or not isinstance(filters_payload, dict):
+        return df
+
+    resolved_league_id = str(league_id or "")
+    if not resolved_league_id:
+        return df
+
+    table_df = _load_league_table(resolved_league_id)
+    if table_df.empty:
+        if notes is not None:
+            notes.append(f"{side_label}_opponent_rank_filters_skipped=no_league_table")
+        return df
+
+    max_rank = int(len(table_df))
+    if max_rank <= 0:
+        return df
+
+    rank_filters = _parse_opponent_rank_filters(filters_payload, max_rank=max_rank)
+    if not rank_filters:
+        return df
+
+    match_lookup = _match_name_index()
+    opponent_names = _resolve_opponent_names_vectorized(df, match_lookup)
+    opponent_norm = opponent_names.map(_normalize_team_name)
+    filtered_df = df.copy()
+    filtered_opponent_norm = opponent_norm.copy()
+
+    for filter_key, (low, high) in rank_filters.items():
+        rank_map = _build_team_rank_map(table_df, filter_key)
+        if not rank_map:
+            if notes is not None:
+                notes.append(f"{side_label}_{filter_key}_skipped=no_rank_map")
+            continue
+
+        before_count = int(len(filtered_df))
+        rank_series = filtered_opponent_norm.map(rank_map)
+        keep_mask = rank_series.between(low, high, inclusive="both").fillna(False)
+        filtered_df = filtered_df.loc[keep_mask]
+        filtered_opponent_norm = filtered_opponent_norm.loc[filtered_df.index]
+        after_count = int(len(filtered_df))
+        if notes is not None:
+            notes.append(f"{side_label}_{filter_key}={low}-{high}:{before_count}->{after_count}")
+
+    return filtered_df
+
+
+def _is_similar_teams_filter_enabled(filters_payload: dict[str, Any]) -> bool:
+    if not isinstance(filters_payload, dict):
+        return False
+
+    explicit_flag = filters_payload.get("similar_teams")
+    if isinstance(explicit_flag, bool):
+        return explicit_flag
+    if isinstance(explicit_flag, str):
+        explicit_text = explicit_flag.strip().lower()
+        if explicit_text in {"1", "true", "yes", "on"}:
+            return True
+        if explicit_text in {"0", "false", "no", "off"}:
+            return False
+
+    mode = str(filters_payload.get("similar_teams_mode", SIMILAR_TEAMS_MODE_OFF) or "").strip().lower()
+    return mode in {"similar", "pca", SIMILAR_TEAMS_MODE_PCA_CLUSTER, "true", "1", "on"}
+
+
+def _select_similarity_k(x_pca: np.ndarray) -> int:
+    n_teams = int(len(x_pca))
+    if n_teams <= 1:
+        return 1
+
+    low = max(SIMILAR_TEAMS_MIN_K, 2)
+    high = min(SIMILAR_TEAMS_MAX_K, n_teams - 1)
+    if high < low:
+        return 2 if n_teams >= 2 else 1
+
+    best_any: tuple[float, int] | None = None
+    best_any_k = low
+    best_valid: tuple[float, int] | None = None
+    best_valid_k = low
+
+    for k in range(low, high + 1):
+        model = KMeans(n_clusters=int(k), random_state=42, n_init=25)
+        labels = model.fit_predict(x_pca)
+        counts = np.bincount(labels, minlength=k)
+        min_size_observed = int(counts.min()) if len(counts) else 0
+        max_share_observed = float(counts.max() / n_teams) if len(counts) else 1.0
+        valid = bool(
+            min_size_observed >= SIMILAR_TEAMS_MIN_CLUSTER_SIZE
+            and max_share_observed <= SIMILAR_TEAMS_MAX_CLUSTER_SHARE
+        )
+        score = float("-inf")
+        if n_teams > k:
+            try:
+                score = float(silhouette_score(x_pca, labels))
+            except Exception:
+                score = float("-inf")
+        sort_key = (score, -k)
+
+        if best_any is None or sort_key > best_any:
+            best_any = sort_key
+            best_any_k = int(k)
+        if valid and (best_valid is None or sort_key > best_valid):
+            best_valid = sort_key
+            best_valid_k = int(k)
+
+    return best_valid_k if best_valid is not None else best_any_k
+
+
+_similarity_index_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_SIMILARITY_INDEX_TTL = 600  # seconds – rebuild cluster index every 10 minutes
+
+def _global_team_similarity_index() -> dict[str, Any]:
+    now = monotonic()
+    if _similarity_index_cache["data"] is not None and now - _similarity_index_cache["ts"] < _SIMILARITY_INDEX_TTL:
+        return _similarity_index_cache["data"]
+
+    result = _build_team_similarity_index()
+    _similarity_index_cache["data"] = result
+    _similarity_index_cache["ts"] = now
+    return result
+
+
+def _build_team_similarity_index() -> dict[str, Any]:
+    empty = {
+        "frame": pd.DataFrame(),
+        "k_effective": 0,
+        "pca_components": 0,
+        "pca_explained_variance": 0.0,
+        "features_used": [],
+    }
+
+    try:
+        from backend.team_clustering import FEATURE_BASE_COLUMNS, _discover_league_datasets, build_team_feature_frame
+    except Exception:
+        return empty
+
+    datasets = _discover_league_datasets()
+    if not datasets:
+        return empty
+
+    team_frames: list[pd.DataFrame] = []
+    for dataset in datasets:
+        team_df = build_team_feature_frame(dataset.season_df, min_matches=SIMILAR_TEAMS_MIN_MATCHES)
+        if team_df.empty:
+            continue
+        team_df = team_df.copy()
+        team_df.insert(0, "league_slug", dataset.league_slug)
+        team_df.insert(1, "league_name", dataset.league_name)
+        team_frames.append(team_df)
+
+    if not team_frames:
+        return empty
+
+    combined = pd.concat(team_frames, ignore_index=True)
+    feature_cols = [
+        column for column in FEATURE_BASE_COLUMNS if column in combined.columns and combined[column].notna().any()
+    ]
+    if not feature_cols:
+        return empty
+
+    matrix = combined[feature_cols].apply(pd.to_numeric, errors="coerce")
+    matrix = matrix.fillna(matrix.median(axis=0, numeric_only=True)).fillna(0.0)
+    std_by_feature = matrix.std(axis=0, ddof=0)
+    kept_features = [column for column in feature_cols if float(std_by_feature.get(column, 0.0)) > 1e-6]
+    if not kept_features:
+        kept_features = feature_cols
+
+    x_raw = matrix[kept_features].to_numpy(dtype=float, copy=True)
+    if x_raw.size == 0:
+        return empty
+
+    scaler = StandardScaler()
+    x_scaled = scaler.fit_transform(x_raw)
+
+    pca_explained_variance = 1.0
+    x_projected = x_scaled
+    if x_scaled.shape[0] > 1 and x_scaled.shape[1] > 1:
+        try:
+            pca = PCA(n_components=SIMILAR_TEAMS_PCA_EXPLAINED_VARIANCE, svd_solver="full")
+            x_projected = pca.fit_transform(x_scaled)
+            pca_explained_variance = float(np.sum(pca.explained_variance_ratio_))
+            if x_projected.ndim == 1:
+                x_projected = x_projected.reshape(-1, 1)
+        except Exception:
+            x_projected = x_scaled
+            pca_explained_variance = 1.0
+
+    k_effective = _select_similarity_k(x_projected)
+    if k_effective <= 1:
+        labels = np.zeros(len(combined), dtype=int)
+    else:
+        labels = KMeans(n_clusters=int(k_effective), random_state=42, n_init=25).fit_predict(x_projected)
+
+    pc_columns = [f"pc_{idx + 1}" for idx in range(x_projected.shape[1])]
+    similarity_frame = combined[["league_slug", "league_name", "team"]].copy()
+    similarity_frame["team_norm"] = similarity_frame["team"].astype(str).map(_normalize_team_name)
+    similarity_frame["cluster_id"] = labels.astype(int)
+    similarity_frame["cluster_size"] = similarity_frame["cluster_id"].map(
+        similarity_frame["cluster_id"].value_counts().to_dict()
+    )
+    for idx, column in enumerate(pc_columns):
+        similarity_frame[column] = x_projected[:, idx]
+
+    return {
+        "frame": similarity_frame,
+        "k_effective": int(k_effective),
+        "pca_components": int(x_projected.shape[1]),
+        "pca_explained_variance": float(pca_explained_variance),
+        "features_used": kept_features,
+    }
+
+
+def _resolve_similar_team_norms(
+    anchor_team_name: str,
+    max_similar_teams: int = SIMILAR_TEAMS_DEFAULT_LIMIT,
+) -> tuple[set[str], dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "anchor_team_norm": "",
+        "cluster_id": None,
+        "cluster_pool_size": 0,
+        "selected_count": 0,
+        "k_effective": 0,
+        "pca_components": 0,
+        "pca_explained_variance": 0.0,
+    }
+
+    similarity_index = _global_team_similarity_index()
+    frame = similarity_index.get("frame")
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return set(), metadata
+
+    anchor_norm = _normalize_team_name(anchor_team_name)
+    metadata["anchor_team_norm"] = anchor_norm
+    if not anchor_norm:
+        return set(), metadata
+
+    anchor_candidates = frame[frame["team_norm"] == anchor_norm]
+    if anchor_candidates.empty:
+        return set(), metadata
+
+    metadata["k_effective"] = int(similarity_index.get("k_effective", 0))
+    metadata["pca_components"] = int(similarity_index.get("pca_components", 0))
+    metadata["pca_explained_variance"] = float(similarity_index.get("pca_explained_variance", 0.0))
+
+    anchor_row = anchor_candidates.iloc[0]
+    cluster_id = int(anchor_row["cluster_id"])
+    metadata["cluster_id"] = cluster_id
+
+    cluster_rows = frame[frame["cluster_id"] == cluster_id].copy()
+    metadata["cluster_pool_size"] = int(len(cluster_rows))
+    if cluster_rows.empty:
+        return {anchor_norm}, metadata
+
+    pc_columns = [column for column in cluster_rows.columns if column.startswith("pc_")]
+    if pc_columns:
+        cluster_vectors = cluster_rows[pc_columns].to_numpy(dtype=float)
+        anchor_vector = anchor_row[pc_columns].to_numpy(dtype=float)
+        distances = np.linalg.norm(cluster_vectors - anchor_vector, axis=1)
+        cluster_rows["distance_to_anchor"] = distances
+        cluster_rows = cluster_rows.sort_values(
+            by=["distance_to_anchor", "team_norm"],
+            kind="mergesort",
+        )
+    else:
+        cluster_rows = cluster_rows.sort_values(by=["team_norm"], kind="mergesort")
+
+    limit = _safe_int(max_similar_teams, SIMILAR_TEAMS_DEFAULT_LIMIT)
+    limit = max(1, min(30, limit))
+    selected = cluster_rows.head(limit)
+    similar_norms = {str(value) for value in selected["team_norm"].dropna().tolist()}
+    similar_norms.add(anchor_norm)
+    metadata["selected_count"] = int(len(similar_norms))
+    return similar_norms, metadata
+
+
+def _apply_similar_teams_filter(
+    df: pd.DataFrame,
+    filters_payload: dict[str, Any],
+    anchor_opponent_team_name: str | None,
+    notes: list[str] | None = None,
+    side_label: str = "team",
+) -> pd.DataFrame:
+    if df.empty or not isinstance(filters_payload, dict):
+        return df
+    if not _is_similar_teams_filter_enabled(filters_payload):
+        return df
+
+    anchor_name = str(anchor_opponent_team_name or "").strip()
+    if not anchor_name:
+        if notes is not None:
+            notes.append(f"{side_label}_similar_teams_skipped=no_anchor_team")
+        return df
+
+    similar_limit = _safe_int(filters_payload.get("similar_teams_limit"), SIMILAR_TEAMS_DEFAULT_LIMIT)
+    similar_team_norms, metadata = _resolve_similar_team_norms(
+        anchor_name,
+        max_similar_teams=similar_limit,
+    )
+    if not similar_team_norms:
+        if notes is not None:
+            notes.append(f"{side_label}_similar_teams_skipped=no_similarity_index")
+        return df
+
+    match_lookup = _match_name_index()
+    opponent_names = _resolve_opponent_names_vectorized(df, match_lookup)
+    opponent_norm = opponent_names.map(_normalize_team_name)
+
+    before_count = int(len(df))
+    filtered_df = df.loc[opponent_norm.isin(similar_team_norms).fillna(False)]
+    after_count = int(len(filtered_df))
+
+    if notes is not None:
+        notes.append(
+            f"{side_label}_similar_teams={SIMILAR_TEAMS_MODE_PCA_CLUSTER}:"
+            f"anchor={metadata.get('anchor_team_norm')},cluster={metadata.get('cluster_id')},"
+            f"selected={metadata.get('selected_count')},k={metadata.get('k_effective')},"
+            f"pca_var={float(metadata.get('pca_explained_variance', 0.0)):.3f}:"
+            f"{before_count}->{after_count}"
+        )
+
+    return filtered_df
+
+
+def _build_match_datetime_index_from_df(df: pd.DataFrame) -> dict[int, pd.Timestamp]:
+    if df.empty:
+        return {}
+
+    match_id_col = None
+    for candidate in ("match_id", "game_id", "id"):
+        if candidate in df.columns:
+            match_id_col = candidate
+            break
+    if match_id_col is None:
+        return {}
+
+    date_col = next((c for c in DATE_COLUMN_CANDIDATES if c in df.columns), None)
+    if date_col is None:
+        return {}
+
+    parsed = pd.to_datetime(df[date_col], utc=True, errors="coerce")
+    enriched = pd.DataFrame(
+        {
+            "match_id": pd.to_numeric(df[match_id_col], errors="coerce"),
+            "match_datetime": parsed,
+        }
+    ).dropna(subset=["match_id", "match_datetime"])
+
+    if enriched.empty:
+        return {}
+
+    enriched["match_id"] = enriched["match_id"].astype(int)
+    enriched = enriched.sort_values("match_datetime").drop_duplicates(subset=["match_id"], keep="last")
+    return dict(zip(enriched["match_id"].astype(int), enriched["match_datetime"]))
+
+
+_match_datetime_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
+def _match_datetime_index() -> dict[int, pd.Timestamp]:
+    now = monotonic()
+    if _match_datetime_cache["data"] is not None and now - _match_datetime_cache["ts"] < _RAW_DF_TTL:
+        return _match_datetime_cache["data"]
+
+    raw_df = _load_raw_df()
+    mapping = _build_match_datetime_index_from_df(raw_df)
+    if not mapping:
+        # Local fallback if the primary analytics file lacks date columns.
+        if SEASON_DATE_FALLBACK_PATH.exists():
+            fallback_df = pd.read_csv(SEASON_DATE_FALLBACK_PATH)
+            mapping = _build_match_datetime_index_from_df(fallback_df)
+
+    result = mapping or {}
+    _match_datetime_cache["data"] = result
+    _match_datetime_cache["ts"] = now
+    return result
+
+
+def _sort_team_history(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    sorted_df = df.copy()
+    if "match_datetime" in sorted_df.columns:
+        sorted_df["_sort_datetime"] = pd.to_datetime(sorted_df["match_datetime"], utc=True, errors="coerce")
+    else:
+        datetime_lookup = _match_datetime_index()
+        sorted_df["_sort_datetime"] = sorted_df["match_id"].map(
+            lambda value: datetime_lookup.get(_safe_int(value, -1))
+        )
+
+    sorted_df["_sort_match_id"] = pd.to_numeric(sorted_df.get("match_id"), errors="coerce")
+    sorted_df = sorted_df.sort_values(
+        by=["_sort_datetime", "_sort_match_id"],
+        ascending=[True, True],
+        na_position="last",
+        kind="mergesort",
+    )
+    return sorted_df.drop(columns=["_sort_datetime", "_sort_match_id"], errors="ignore")
+
+
+def _split_result_counts(df: pd.DataFrame) -> dict[str, int]:
+    if "one_x_two_result" not in df.columns:
+        return {"wins": 0, "draws": 0, "losses": 0}
+
+    result_series = df["one_x_two_result"]
+    wins = int((result_series == 1.0).sum())
+    draws = int((result_series == 0.5).sum())
+    losses = int((result_series == 0.1).sum())
+    return {"wins": wins, "draws": draws, "losses": losses}
+
+
+def _apply_npg_adjustment(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adjust goal columns by subtracting penalty goals.
+    Returns a copy with total_goals, goals_scored, and opponent_goals reduced
+    by the corresponding penalty goal counts.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+
+    if "penalty_goals_home" in out.columns:
+        pen_home = pd.to_numeric(out["penalty_goals_home"], errors="coerce").fillna(0)
+    else:
+        pen_home = pd.Series(0, index=out.index)
+    if "penalty_goals_away" in out.columns:
+        pen_away = pd.to_numeric(out["penalty_goals_away"], errors="coerce").fillna(0)
+    else:
+        pen_away = pd.Series(0, index=out.index)
+    total_pen = pen_home + pen_away
+
+    if "total_goals" in out.columns:
+        out["total_goals"] = pd.to_numeric(out["total_goals"], errors="coerce").fillna(0) - total_pen
+
+    # For team-perspective goals (goals_scored / opponent_goals), penalty
+    # subtraction depends on which side the team is on (venue column).
+    if "goals_scored" in out.columns and "venue" in out.columns:
+        gs = pd.to_numeric(out["goals_scored"], errors="coerce").fillna(0)
+        team_pen = pen_home.where(out["venue"] == "home", pen_away)
+        out["goals_scored"] = gs - team_pen
+
+    if "opponent_goals" in out.columns and "venue" in out.columns:
+        og = pd.to_numeric(out["opponent_goals"], errors="coerce").fillna(0)
+        opp_pen = pen_away.where(out["venue"] == "home", pen_home)
+        out["opponent_goals"] = og - opp_pen
+
+    return out
+
+
+def _split_over_under_counts(df: pd.DataFrame, line: float) -> dict[str, int]:
+    if "total_goals" not in df.columns:
+        return {"over": 0, "under": 0}
+
+    total_goals = pd.to_numeric(df["total_goals"], errors="coerce").fillna(0.0)
+    over = int((total_goals > line).sum())
+    under = int((total_goals <= line).sum())
+    return {"over": over, "under": under}
+
+
+def _split_over_under_counts_for_column(df: pd.DataFrame, line: float, column: str) -> dict[str, int]:
+    if column not in df.columns:
+        return {"over": 0, "under": 0}
+
+    goal_values = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    over = int((goal_values > line).sum())
+    under = int((goal_values <= line).sum())
+    return {"over": over, "under": under}
+
+
+def _split_double_chance_counts(df: pd.DataFrame) -> dict[str, int]:
+    if "double_chance_outcome" in df.columns:
+        outcomes = pd.to_numeric(df["double_chance_outcome"], errors="coerce").fillna(0)
+        hits = int((outcomes == 1).sum())
+        misses = int((outcomes == 0).sum())
+        return {"hits": hits, "misses": misses}
+
+    if {"goals_scored", "opponent_goals"}.issubset(df.columns):
+        goals_scored = pd.to_numeric(df["goals_scored"], errors="coerce").fillna(0)
+        opponent_goals = pd.to_numeric(df["opponent_goals"], errors="coerce").fillna(0)
+        hits = int((goals_scored >= opponent_goals).sum())
+        misses = int((goals_scored < opponent_goals).sum())
+        return {"hits": hits, "misses": misses}
+
+    return {"hits": 0, "misses": 0}
+
+
+def _split_win_both_halves_counts(df: pd.DataFrame) -> dict[str, int]:
+    needed = {"team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"}
+    if needed.issubset(df.columns):
+        th1 = pd.to_numeric(df["team_h1_goals"], errors="coerce").fillna(0)
+        oh1 = pd.to_numeric(df["opponent_h1_goals"], errors="coerce").fillna(0)
+        th2 = pd.to_numeric(df["team_h2_goals"], errors="coerce").fillna(0)
+        oh2 = pd.to_numeric(df["opponent_h2_goals"], errors="coerce").fillna(0)
+        won_both = ((th1 > oh1) & (th2 > oh2))
+        hits = int(won_both.sum())
+        misses = int((~won_both).sum())
+        return {"hits": hits, "misses": misses}
+    return {"hits": 0, "misses": 0}
+
+
+def _split_win_either_half_counts(df: pd.DataFrame) -> dict[str, int]:
+    needed = {"team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals"}
+    if needed.issubset(df.columns):
+        th1 = pd.to_numeric(df["team_h1_goals"], errors="coerce").fillna(0)
+        oh1 = pd.to_numeric(df["opponent_h1_goals"], errors="coerce").fillna(0)
+        th2 = pd.to_numeric(df["team_h2_goals"], errors="coerce").fillna(0)
+        oh2 = pd.to_numeric(df["opponent_h2_goals"], errors="coerce").fillna(0)
+        won_either = ((th1 > oh1) | (th2 > oh2))
+        hits = int(won_either.sum())
+        misses = int((~won_either).sum())
+        return {"hits": hits, "misses": misses}
+    return {"hits": 0, "misses": 0}
+
+
+def _split_btts_counts(df: pd.DataFrame) -> dict[str, int]:
+    if {"goals_scored", "opponent_goals"}.issubset(df.columns):
+        goals_scored = pd.to_numeric(df["goals_scored"], errors="coerce").fillna(0)
+        opponent_goals = pd.to_numeric(df["opponent_goals"], errors="coerce").fillna(0)
+        hits = int(((goals_scored > 0) & (opponent_goals > 0)).sum())
+        misses = int(((goals_scored <= 0) | (opponent_goals <= 0)).sum())
+        return {"hits": hits, "misses": misses}
+
+    return {"hits": 0, "misses": 0}
+
+
+def _split_result_counts_from_goals(
+    df: pd.DataFrame,
+    goals_column: str = "goals_scored",
+    opponent_goals_column: str = "opponent_goals",
+) -> dict[str, int]:
+    if {goals_column, opponent_goals_column}.issubset(df.columns):
+        goals_scored = pd.to_numeric(df[goals_column], errors="coerce").fillna(0)
+        opponent_goals = pd.to_numeric(df[opponent_goals_column], errors="coerce").fillna(0)
+        wins = int((goals_scored > opponent_goals).sum())
+        draws = int((goals_scored == opponent_goals).sum())
+        losses = int((goals_scored < opponent_goals).sum())
+        return {"wins": wins, "draws": draws, "losses": losses}
+    return {"wins": 0, "draws": 0, "losses": 0}
+
+
+def _split_first_half_over_under_counts(df: pd.DataFrame, line: float) -> dict[str, int]:
+    if {"team_h1_goals", "opponent_h1_goals"}.issubset(df.columns):
+        th1 = pd.to_numeric(df["team_h1_goals"], errors="coerce").fillna(0)
+        oh1 = pd.to_numeric(df["opponent_h1_goals"], errors="coerce").fillna(0)
+        totals = th1 + oh1
+        over = int((totals > line).sum())
+        under = int((totals <= line).sum())
+        return {"over": over, "under": under}
+    return {"over": 0, "under": 0}
+
+
+def _split_first_half_result_counts(df: pd.DataFrame) -> dict[str, int]:
+    return _split_result_counts_from_goals(
+        df,
+        goals_column="team_h1_goals",
+        opponent_goals_column="opponent_h1_goals",
+    )
+
+
+def _coerce_numeric_series(df: pd.DataFrame, column_candidates: list[str]) -> pd.Series:
+    for column in column_candidates:
+        if column in df.columns:
+            return pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    return pd.Series(0.0, index=df.index, dtype="float64")
+
+
+@lru_cache(maxsize=1)
+def _corner_total_override_by_match_id() -> dict[int, float]:
+    # Try MongoDB first
+    col = get_collection("corner_overrides")
+    if col is not None:
+        try:
+            docs = list(col.find({}, {"_id": 0}))
+            if docs:
+                overrides_df = pd.DataFrame(docs)
+                if not overrides_df.empty:
+                    match_id_col = "match_id" if "match_id" in overrides_df.columns else None
+                    total_col = "total_corners" if "total_corners" in overrides_df.columns else None
+                    if match_id_col and total_col:
+                        match_ids = pd.to_numeric(overrides_df[match_id_col], errors="coerce")
+                        totals = pd.to_numeric(overrides_df[total_col], errors="coerce")
+                        cleaned = pd.DataFrame({"match_id": match_ids, "total_corners": totals}).dropna(subset=["match_id", "total_corners"])
+                        if not cleaned.empty:
+                            cleaned["match_id"] = cleaned["match_id"].astype(int)
+                            return dict(zip(cleaned["match_id"].astype(int), cleaned["total_corners"].astype(float)))
+        except Exception:
+            pass
+
+    # Fallback to local CSV
+    if not CORNER_OVERRIDES_PATH.exists():
+        return {}
+
+    try:
+        overrides_df = pd.read_csv(CORNER_OVERRIDES_PATH)
+    except Exception:
+        return {}
+
+    if overrides_df.empty:
+        return {}
+
+    match_id_col = "match_id" if "match_id" in overrides_df.columns else None
+    total_col = "total_corners" if "total_corners" in overrides_df.columns else None
+    if match_id_col is None or total_col is None:
+        return {}
+
+    match_ids = pd.to_numeric(overrides_df[match_id_col], errors="coerce")
+    totals = pd.to_numeric(overrides_df[total_col], errors="coerce")
+    cleaned = pd.DataFrame({"match_id": match_ids, "total_corners": totals}).dropna(subset=["match_id", "total_corners"])
+    if cleaned.empty:
+        return {}
+
+    cleaned["match_id"] = cleaned["match_id"].astype(int)
+    return dict(zip(cleaned["match_id"].astype(int), cleaned["total_corners"].astype(float)))
+
+
+def _resolve_total_corners_series(df: pd.DataFrame) -> pd.Series:
+    if "total_corners" in df.columns:
+        resolved = pd.to_numeric(df["total_corners"], errors="coerce").fillna(0.0)
+    else:
+        home_series = _coerce_numeric_series(df, ["home_corners", "corners_home", "corner_kicks_home"])
+        away_series = _coerce_numeric_series(df, ["away_corners", "corners_away", "corner_kicks_away"])
+        resolved = (home_series + away_series).fillna(0.0)
+
+    overrides = _corner_total_override_by_match_id()
+    if overrides and "match_id" in df.columns:
+        match_ids = pd.to_numeric(df["match_id"], errors="coerce")
+        override_values = match_ids.map(lambda value: overrides.get(int(value)) if pd.notna(value) else None)
+        override_mask = override_values.notna()
+        if override_mask.any():
+            resolved = resolved.copy()
+            resolved.loc[override_mask] = override_values.loc[override_mask].astype(float)
+
+    return resolved
+
+
+def _resolve_total_corners_from_row(row: dict[str, Any] | pd.Series) -> float:
+    match_id = _safe_int(row.get("match_id"), -1)
+    override = _corner_total_override_by_match_id().get(match_id)
+    if override is not None:
+        return float(override)
+
+    total_corners = pd.to_numeric(row.get("total_corners"), errors="coerce")
+    if pd.notna(total_corners):
+        return float(total_corners)
+
+    home_corners = 0.0
+    for column in ("home_corners", "corners_home", "corner_kicks_home"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.notna(value):
+            home_corners = float(value)
+            break
+
+    away_corners = 0.0
+    for column in ("away_corners", "corners_away", "corner_kicks_away"):
+        value = pd.to_numeric(row.get(column), errors="coerce")
+        if pd.notna(value):
+            away_corners = float(value)
+            break
+
+    return home_corners + away_corners
+
+
+def _split_corner_metrics(df: pd.DataFrame, line: float = 8.5) -> dict[str, float]:
+    if df.empty:
+        return {
+            "matches": 0,
+            "avg_total_corners": 0.0,
+            "min_total_corners": 0.0,
+            "max_total_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+
+    corners = _resolve_total_corners_series(df)
+    if corners.empty:
+        return {
+            "matches": 0,
+            "avg_total_corners": 0.0,
+            "min_total_corners": 0.0,
+            "max_total_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+
+    over = int((corners > line).sum())
+    under = int((corners <= line).sum())
+
+    return {
+        "matches": int(len(corners)),
+        "avg_total_corners": round(float(corners.mean()), 2),
+        "min_total_corners": round(float(corners.min()), 2),
+        "max_total_corners": round(float(corners.max()), 2),
+        "over": over,
+        "under": under,
+    }
+
+
+def _resolve_side_corners_series(df: pd.DataFrame, side: str) -> pd.Series:
+    """Resolve a single side's corners series (side = 'home' or 'away')."""
+    cols = [f"{side}_corners", f"corners_{side}", f"corner_kicks_{side}"]
+    return _coerce_numeric_series(df, cols).fillna(0.0)
+
+
+def _split_side_corner_metrics(df: pd.DataFrame, line: float, side: str) -> dict[str, float]:
+    """Compute over/under metrics for a single side's corners."""
+    if df.empty:
+        return {
+            "matches": 0,
+            "avg_corners": 0.0,
+            "min_corners": 0.0,
+            "max_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+    corners = _resolve_side_corners_series(df, side)
+    if corners.empty:
+        return {
+            "matches": 0,
+            "avg_corners": 0.0,
+            "min_corners": 0.0,
+            "max_corners": 0.0,
+            "over": 0,
+            "under": 0,
+        }
+    over = int((corners > line).sum())
+    under = int((corners <= line).sum())
+    return {
+        "matches": int(len(corners)),
+        "avg_corners": round(float(corners.mean()), 2),
+        "min_corners": round(float(corners.min()), 2),
+        "max_corners": round(float(corners.max()), 2),
+        "over": over,
+        "under": under,
+    }
+
+
+_match_name_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
+def _match_name_index() -> dict[int, tuple[str, str]]:
+    now = monotonic()
+    if _match_name_cache["data"] is not None and now - _match_name_cache["ts"] < _RAW_DF_TTL:
+        return _match_name_cache["data"]
+    raw_df = _load_raw_df()
+    match_df = raw_df[["match_id", "home_team", "away_team"]].drop_duplicates(subset=["match_id"])
+    mapping: dict[int, tuple[str, str]] = {}
+    for t in match_df.itertuples(index=False):
+        mapping[int(t.match_id)] = (_format_team_name(str(t.home_team)), _format_team_name(str(t.away_team)))
+    _match_name_cache["data"] = mapping
+    _match_name_cache["ts"] = now
+    return mapping
+
+
+def _safe_optional_float(value: Any) -> float | None:
+    numeric = _safe_float(value, float("nan"))
+    if pd.isna(numeric):
+        return None
+    return float(numeric)
+
+
+def _resolve_team_opponent_values(
+    row: dict[str, Any],
+    venue: str,
+    home_key: str,
+    away_key: str,
+) -> tuple[float | None, float | None]:
+    home_value = _safe_optional_float(row.get(home_key))
+    away_value = _safe_optional_float(row.get(away_key))
+    if venue == "home":
+        return home_value, away_value
+    if venue == "away":
+        return away_value, home_value
+    return home_value, away_value
+
+
+@lru_cache(maxsize=16)
+def _opponent_rank_maps_for_league(league_id: str) -> dict[str, dict[str, int]]:
+    resolved_league_id = str(league_id or "").strip()
+    if not resolved_league_id:
+        return {}
+
+    table_df = _load_league_table(resolved_league_id)
+    if table_df.empty:
+        return {}
+
+    return {
+        key: _build_team_rank_map(table_df, key)
+        for key in OPPONENT_RANK_FILTER_CONFIG
+    }
+
+
+def _build_overlay_metrics_from_row(
+    row: dict[str, Any],
+    venue: str,
+    opponent_name: str,
+    league_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_venue = str(venue).strip().lower()
+    team_momentum, opponent_momentum = _resolve_team_opponent_values(
+        row, normalized_venue, "home_momentum", "away_momentum"
+    )
+    team_xg, opponent_xg = _resolve_team_opponent_values(
+        row, normalized_venue, "expected_goals_home", "expected_goals_away"
+    )
+    team_possession, opponent_possession = _resolve_team_opponent_values(
+        row, normalized_venue, "ball_possession_home", "ball_possession_away"
+    )
+    team_field_tilt, _ = _resolve_team_opponent_values(
+        row, normalized_venue, "field_tilt_home", "field_tilt_away"
+    )
+
+    team_goals = _safe_optional_float(row.get("goals_scored"))
+    opponent_goals = _safe_optional_float(row.get("opponent_goals"))
+    total_goals = _safe_optional_float(row.get("total_goals"))
+    if total_goals is None and team_goals is not None and opponent_goals is not None:
+        total_goals = round(team_goals + opponent_goals, 2)
+
+    total_xg = round(team_xg + opponent_xg, 4) if team_xg is not None and opponent_xg is not None else None
+
+    overlay_payload: dict[str, Any] = {
+        "team_momentum_range": team_momentum,
+        "opponent_momentum_range": opponent_momentum,
+        "total_match_goals_range": total_goals,
+        "team_goals_range": team_goals,
+        "opposition_goals_range": opponent_goals,
+        "team_xg": team_xg,
+        "opponent_xg": opponent_xg,
+        "total_xg": total_xg,
+        "team_xg_range": team_xg,
+        "opposition_xg_range": opponent_xg,
+        "team_possession_range": team_possession,
+        "opposition_possession_range": opponent_possession,
+        "field_tilt_range": team_field_tilt,
+    }
+
+    resolved_league_id = str(league_id or row.get("league_id", "") or "").strip()
+    opponent_norm = _normalize_team_name(opponent_name)
+    if resolved_league_id and opponent_norm:
+        rank_maps = _opponent_rank_maps_for_league(resolved_league_id)
+        for filter_key, rank_map in rank_maps.items():
+            rank_value = rank_map.get(opponent_norm)
+            if rank_value is not None:
+                overlay_payload[filter_key] = int(rank_value)
+
+    return overlay_payload
+
+
+def _build_opponent_rank_overlay(
+    league_id: str | None,
+    opponent_name: str | None,
+) -> dict[str, int]:
+    resolved_league_id = str(league_id or "").strip()
+    opponent_norm = _normalize_team_name(str(opponent_name or ""))
+    if not resolved_league_id or not opponent_norm:
+        return {}
+
+    rank_maps = _opponent_rank_maps_for_league(resolved_league_id)
+    if not rank_maps:
+        return {}
+
+    payload: dict[str, int] = {}
+    for filter_key, rank_map in rank_maps.items():
+        rank_value = rank_map.get(opponent_norm)
+        if rank_value is not None:
+            payload[filter_key] = int(rank_value)
+    return payload
+
+
+def _build_opponent_rank_payload(
+    league_id: str | None,
+    home_team_name: str | None,
+    away_team_name: str | None,
+) -> dict[str, dict[str, int]]:
+    return {
+        "home_team": _build_opponent_rank_overlay(league_id, away_team_name),
+        "away_team": _build_opponent_rank_overlay(league_id, home_team_name),
+    }
+
+
+def _format_match_date(match_datetime) -> str:
+    if match_datetime is None:
+        return ""
+    try:
+        ts = pd.Timestamp(match_datetime)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        return ts.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return ""
+
+
+def _resolve_names_and_label(venue: str, home_name: str, away_name: str) -> tuple[str, str, str, str]:
+    if venue == "home":
+        return home_name, away_name, f"vs {away_name}", f"{home_name} vs {away_name}"
+    return away_name, home_name, f"@ {home_name}", f"{home_name} vs {away_name}"
+
+
+def _build_recent_matches(df: pd.DataFrame, league_id: str | None = None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        result_value = float(row.get("one_x_two_result", 0.5))
+        if result_value == 1.0:
+            result = "W"
+        elif result_value == 0.5:
+            result = "D"
+        else:
+            result = "L"
+
+        venue = str(row.get("venue", ""))
+        home_momentum = float(row.get("home_momentum", 0.0))
+        away_momentum = float(row.get("away_momentum", 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "result": result,
+                "team_momentum": home_momentum if venue == "home" else away_momentum,
+                "opponent_momentum": away_momentum if venue == "home" else home_momentum,
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+    return rows
+
+
+def _build_recent_matches_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        venue = str(row.get("venue", ""))
+        total_goals = float(row.get("total_goals", 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_goals": total_goals,
+                "over_under_result": "O" if total_goals > line else "U",
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_team_goals_over_under(
+    df: pd.DataFrame,
+    line: float,
+    goals_column: str = "goals_scored",
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        venue = str(row.get("venue", ""))
+        team_goals = float(row.get(goals_column, 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "team_goals": team_goals,
+                "over_under_result": "O" if team_goals > line else "U",
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_corners(
+    df: pd.DataFrame,
+    line: float = 8.5,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+        total_corners = _resolve_total_corners_from_row(row)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_corners": total_corners,
+                "corners_over_under_result": "O" if total_corners > line else "U",
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_side_corners(
+    df: pd.DataFrame,
+    line: float,
+    side: str,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build recent-match records for a single side's corners (home or away)."""
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        side_corners = 0.0
+        for col in (f"{side}_corners", f"corners_{side}", f"corner_kicks_{side}"):
+            val = pd.to_numeric(row.get(col), errors="coerce")
+            if pd.notna(val):
+                side_corners = float(val)
+                break
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "side_corners": side_corners,
+                "corners_over_under_result": "O" if side_corners > line else "U",
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_double_chance(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        if goals_scored > opponent_goals:
+            result = "W"
+        elif goals_scored == opponent_goals:
+            result = "D"
+        else:
+            result = "L"
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        is_hit = result in {"W", "D"}
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "result": result,
+                "double_chance_result": "H" if is_hit else "M",
+                "double_chance_value": 1.0 if is_hit else 0.1,
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_btts(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        is_btts = goals_scored > 0 and opponent_goals > 0
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                "btts_result": "Y" if is_btts else "N",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_weh(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        th1 = float(row.get("team_h1_goals", 0))
+        oh1 = float(row.get("opponent_h1_goals", 0))
+        th2 = float(row.get("team_h2_goals", 0))
+        oh2 = float(row.get("opponent_h2_goals", 0))
+        won_either = (th1 > oh1) or (th2 > oh2)
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "team_h2_goals": th2,
+                "opponent_h2_goals": oh2,
+                "weh_result": "Y" if won_either else "N",
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_wbh(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        th1 = float(row.get("team_h1_goals", 0))
+        oh1 = float(row.get("opponent_h1_goals", 0))
+        th2 = float(row.get("team_h2_goals", 0))
+        oh2 = float(row.get("opponent_h2_goals", 0))
+        won_both = (th1 > oh1) and (th2 > oh2)
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "team_h2_goals": th2,
+                "opponent_h2_goals": oh2,
+                "wbh_result": "Y" if won_both else "N",
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_one_x_two_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        if goals_scored > opponent_goals:
+            result = "W"
+        elif goals_scored == opponent_goals:
+            result = "D"
+        else:
+            result = "L"
+
+        venue = str(row.get("venue", ""))
+        total_goals = float(row.get("total_goals", 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_goals": total_goals,
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                "result": result,
+                "over_under_result": "O" if total_goals > line else "U",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_double_chance_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        if goals_scored > opponent_goals:
+            result = "W"
+        elif goals_scored == opponent_goals:
+            result = "D"
+        else:
+            result = "L"
+        is_hit = result in {"W", "D"}
+
+        venue = str(row.get("venue", ""))
+        total_goals = float(row.get("total_goals", 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_goals": total_goals,
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                "result": result,
+                "double_chance_result": "H" if is_hit else "M",
+                "over_under_result": "O" if total_goals > line else "U",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_btts_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        is_btts = goals_scored > 0 and opponent_goals > 0
+
+        venue = str(row.get("venue", ""))
+        total_goals = float(row.get("total_goals", 0.0))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_goals": total_goals,
+                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                "btts_result": "Y" if is_btts else "N",
+                "over_under_result": "O" if total_goals > line else "U",
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_first_half_over_under(
+    df: pd.DataFrame,
+    line: float,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        th1 = float(row.get("team_h1_goals", 0.0))
+        oh1 = float(row.get("opponent_h1_goals", 0.0))
+        total_goals = th1 + oh1
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "total_goals": total_goals,
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "over_under_result": "O" if total_goals > line else "U",
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _build_recent_matches_first_half_one_x_two(
+    df: pd.DataFrame,
+    league_id: str | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    match_lookup = _match_name_index()
+    match_datetime_lookup = _match_datetime_index()
+
+    for row in df.to_dict("records"):
+        goals_scored = float(row.get("goals_scored", 0.0))
+        opponent_goals = float(row.get("opponent_goals", 0.0))
+        th1 = float(row.get("team_h1_goals", 0.0))
+        oh1 = float(row.get("opponent_h1_goals", 0.0))
+        if th1 > oh1:
+            result = "W"
+        elif th1 == oh1:
+            result = "D"
+        else:
+            result = "L"
+
+        venue = str(row.get("venue", ""))
+        match_id = int(row.get("match_id", 0))
+        home_name, away_name = match_lookup.get(match_id, ("Home", "Away"))
+        team_name, opponent_name, chart_label, fixture_display = _resolve_names_and_label(venue, home_name, away_name)
+
+        rows.append(
+            {
+                "match_id": match_id,
+                "venue": venue,
+                "opponent_id": int(row.get("opponent_id", 0)),
+                "team_name": team_name,
+                "opponent_name": opponent_name,
+                "chart_label": chart_label,
+                "fixture_display": fixture_display,
+                "match_date": _format_match_date(match_datetime_lookup.get(match_id)),
+                "team_h1_goals": th1,
+                "opponent_h1_goals": oh1,
+                "result": result,
+                                "goals_scored": goals_scored,
+                "opponent_goals": opponent_goals,
+                **_build_overlay_metrics_from_row(
+                    row,
+                    venue=venue,
+                    opponent_name=opponent_name,
+                    league_id=league_id,
+                ),
+            }
+        )
+
+    return rows
+
+
+def _resolve_team_anchor_match(
+    raw_df: pd.DataFrame,
+    team_id: int,
+    team_name: str | None,
+    preferred_perspective: str,
+    league_id: str | None = None,
+) -> tuple[int, str] | None:
+    scoped_df = raw_df
+    resolved_league_id = str(league_id or "").strip()
+    if resolved_league_id and "league_slug" in raw_df.columns:
+        league_matches = raw_df[raw_df["league_slug"].astype(str) == resolved_league_id]
+        if not league_matches.empty:
+            scoped_df = league_matches
+
+    # raw_df is pre-sorted by match_id descending, so .iloc[0] gives the latest match
+    for candidate_id in _candidate_team_ids(team_id, team_name):
+        if preferred_perspective == "home":
+            preferred = scoped_df[scoped_df["home_team_id"] == candidate_id]
+        else:
+            preferred = scoped_df[scoped_df["away_team_id"] == candidate_id]
+
+        if not preferred.empty:
+            row = preferred.iloc[0]
+            return int(row["match_id"]), preferred_perspective
+
+        fallback = scoped_df[
+            (scoped_df["home_team_id"] == candidate_id) | (scoped_df["away_team_id"] == candidate_id)
+        ]
+        if not fallback.empty:
+            row = fallback.iloc[0]
+            perspective = "home" if int(row["home_team_id"]) == candidate_id else "away"
+            return int(row["match_id"]), perspective
+
+    return None
+
+
+def create_app() -> Flask:
+    app = Flask(__name__)
+
+    cors_origin = os.environ.get("CORS_ORIGIN", "*")
+
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = cors_origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+        return response
+
+    @app.route("/api/health", methods=["GET"])
+    def health():
+        return jsonify({"status": "ok"})
+
+    @app.route("/api/leagues", methods=["GET"])
+    def get_leagues():
+        snapshot = _get_nonblocking_fixture_snapshot()
+        leagues_out = []
+        for lg in LEAGUE_REGISTRY:
+            leagues_out.append(
+                {
+                    "id": lg["id"],
+                    "name": lg["name"],
+                    "country": lg["country"],
+                    "flag": lg["flag"],
+                    "current_gameweek": snapshot.current_gameweek,
+                }
+            )
+        return jsonify(
+            {
+                "leagues": leagues_out,
+                "updated_at": snapshot.updated_at,
+                "source": snapshot.source,
+            }
+        )
+
+    @app.route("/api/fixtures", methods=["GET"])
+    def get_fixtures():
+        snapshot = _get_nonblocking_fixture_snapshot()
+        league_id = request.args.get("league_id", "england_premier_league")
+        gameweek_param = request.args.get("gameweek")
+        requested_gameweek = _safe_int(gameweek_param, -1) if gameweek_param is not None else None
+        requested_date = request.args.get("date")
+        now_reference = datetime.now(timezone.utc)
+        requested_reference = _parse_utc_datetime(requested_date)
+        # Never use a reference time behind "now" to avoid surfacing stale fixtures.
+        reference_time = max(now_reference, requested_reference) if requested_reference else now_reference
+        response_source = snapshot.source
+        response_updated_at = snapshot.updated_at
+
+        league_fixtures = [f for f in snapshot.fixtures if f.league_id == league_id]
+        if league_id != "england_premier_league":
+            used_live_source = False
+            live_non_epl_fixtures = _get_live_sofascore_league_fixtures(
+                league_id=league_id,
+                reference_time=reference_time,
+            )
+            if live_non_epl_fixtures:
+                league_fixtures = live_non_epl_fixtures
+                response_source = "live_sofascore"
+                response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                used_live_source = True
+            else:
+                understat_fixtures = _get_understat_league_fixtures(
+                    league_id=league_id,
+                    reference_time=reference_time,
+                )
+                if understat_fixtures:
+                    league_fixtures = understat_fixtures
+                    response_source = "understat_fallback"
+                    response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    used_live_source = True
+
+            if not used_live_source:
+                local_non_epl_fixtures = _get_local_matches_json_league_fixtures(
+                    league_id=league_id,
+                    reference_time=reference_time,
+                )
+                if local_non_epl_fixtures:
+                    league_fixtures = local_non_epl_fixtures
+                    response_source = "local_matches_json"
+                    response_updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+        fixtures = league_fixtures
+        fallback_used = False
+        selected_gameweeks: list[int] = []
+
+        if requested_gameweek is not None and requested_gameweek > 0:
+            gameweek = requested_gameweek
+            fixtures = [f for f in fixtures if f.gameweek == gameweek]
+            fixtures = _upcoming_or_live_fixtures(fixtures, reference_time)
+            selected_gameweeks = [gameweek] if fixtures else []
+            if not fixtures:
+                fixtures = _upcoming_or_live_fixtures(league_fixtures, reference_time)
+                selected_gameweeks = sorted({f.gameweek for f in fixtures if f.gameweek > 0})
+                if selected_gameweeks:
+                    gameweek = selected_gameweeks[0]
+                fallback_used = True
+        else:
+            fixtures, gameweek, selected_gameweeks, fallback_used = _select_next_up_fixtures(
+                league_fixtures,
+                reference_time,
+                gameweeks_to_include=2,
+            )
+            if not fixtures:
+                fixtures = _upcoming_or_live_fixtures(league_fixtures, reference_time)
+                selected_gameweeks = sorted({f.gameweek for f in fixtures if f.gameweek > 0})
+                gameweek = selected_gameweeks[0] if selected_gameweeks else snapshot.current_gameweek
+                fallback_used = True
+
+        payload = [
+            {
+                "match_id": f.match_id,
+                "kickoff": f.kickoff,
+                "gameweek": f.gameweek,
+                "home_team_id": f.home_team_id,
+                "home_team_name": f.home_team_name,
+                "home_team_short_name": f.home_team_short_name,
+                "away_team_id": f.away_team_id,
+                "away_team_name": f.away_team_name,
+                "away_team_short_name": f.away_team_short_name,
+                "home_team_score": f.home_team_score,
+                "away_team_score": f.away_team_score,
+                "finished": f.finished,
+            }
+            for f in fixtures
+        ]
+        return jsonify(
+            {
+                "fixtures": payload,
+                "gameweek": gameweek,
+                "gameweeks": selected_gameweeks,
+                "updated_at": response_updated_at,
+                "source": response_source,
+                "fallback_used": fallback_used,
+            }
+        )
+
+    @app.route("/api/matches/<int:match_id>", methods=["GET"])
+    def get_match(match_id: int):
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, match_id)
+        if fixture is None:
+            return jsonify({"error": f"Match {match_id} not found"}), 404
+
+        return jsonify(
+            {
+                "match_id": fixture.match_id,
+                "league_id": fixture.league_id,
+                "gameweek": fixture.gameweek,
+                "kickoff": fixture.kickoff,
+                "home_team": {"team_id": fixture.home_team_id, "name": fixture.home_team_name},
+                "away_team": {"team_id": fixture.away_team_id, "name": fixture.away_team_name},
+            }
+        )
+
+    @app.route("/api/workspace/1x2", methods=["POST", "OPTIONS"])
+    def get_workspace_1x2():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("1x2", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        _t0 = monotonic()
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            _t1 = monotonic()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+            _t2 = monotonic()
+
+            store = _build_store()
+            workspace = OneXTwoWorkspace(store, outcome_type="1")
+            _t3 = monotonic()
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_evidence = workspace.get_evidence(
+                    match_id=home_anchor_match_id,
+                    bet_type="one_x_two",
+                    filters=filters,
+                    perspective=home_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = home_evidence.df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_evidence = workspace.get_evidence(
+                    match_id=away_anchor_match_id,
+                    bet_type="one_x_two",
+                    filters=filters,
+                    perspective=away_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = away_evidence.df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+            _t4 = monotonic()
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+        _t5 = monotonic()
+
+        home_metrics = _split_result_counts(home_df)
+        away_metrics = _split_result_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Win",
+                "home_count": home_metrics["wins"],
+                "away_count": away_metrics["wins"],
+                "total": home_metrics["wins"] + away_metrics["wins"],
+            },
+            {
+                "label": "Draw",
+                "home_count": home_metrics["draws"],
+                "away_count": away_metrics["draws"],
+                "total": home_metrics["draws"] + away_metrics["draws"],
+            },
+            {
+                "label": "Loss",
+                "home_count": home_metrics["losses"],
+                "away_count": away_metrics["losses"],
+                "total": home_metrics["losses"] + away_metrics["losses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        _t6 = monotonic()
+        recent_home = _build_recent_matches(home_df, league_id=league_id_for_ranking)
+        recent_away = _build_recent_matches(away_df, league_id=league_id_for_ranking)
+        _t7 = monotonic()
+
+        response = {
+            "workspace": {
+                "bet_type": "1X2",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+                "head_to_head": {"home_win": 0, "draw": 0, "away_win": 0},
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": recent_home,
+                "away": recent_away,
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _t8 = monotonic()
+        print(
+            f"[TIMING 1x2] match={requested_match_id} "
+            f"load_raw={(_t1-_t0)*1000:.0f}ms "
+            f"anchors={(_t2-_t1)*1000:.0f}ms "
+            f"store+evidence={(_t4-_t2)*1000:.0f}ms "
+            f"filters={(_t5-_t4)*1000:.0f}ms "
+            f"recent_matches={(_t7-_t6)*1000:.0f}ms "
+            f"total={(_t8-_t0)*1000:.0f}ms",
+            flush=True,
+        )
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/over_under", methods=["POST", "OPTIONS"])
+    def get_workspace_over_under():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("over_under", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            workspace = OverUnderWorkspace(store)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_evidence = workspace.get_evidence(
+                    match_id=home_anchor_match_id,
+                    bet_type="over_under",
+                    filters=filters,
+                    perspective=home_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = home_evidence.df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_evidence = workspace.get_evidence(
+                    match_id=away_anchor_match_id,
+                    bet_type="over_under",
+                    filters=filters,
+                    perspective=away_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = away_evidence.df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        # NPG toggle: subtract penalty goals from goal counts
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_metrics = _split_over_under_counts(home_df, line)
+        away_metrics = _split_over_under_counts(away_df, line)
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_metrics["over"],
+                "away_count": away_metrics["over"],
+                "total": home_metrics["over"] + away_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_metrics["under"],
+                "away_count": away_metrics["under"],
+                "total": home_metrics["under"] + away_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "over_under",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_over_under(home_df, line, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_over_under(away_df, line, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/double_chance", methods=["POST", "OPTIONS"])
+    def get_workspace_double_chance():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("double_chance", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            workspace = DoubleChanceWorkspace(store)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_evidence = workspace.get_evidence(
+                    match_id=home_anchor_match_id,
+                    bet_type="double_chance",
+                    filters=filters,
+                    perspective=home_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = home_evidence.df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_evidence = workspace.get_evidence(
+                    match_id=away_anchor_match_id,
+                    bet_type="double_chance",
+                    filters=filters,
+                    perspective=away_perspective,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = away_evidence.df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_double_chance_counts(home_df)
+        away_metrics = _split_double_chance_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Hit (Win/Draw)",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "Miss (Loss)",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "double_chance",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_double_chance(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_double_chance(away_df, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/btts", methods=["POST", "OPTIONS"])
+    def get_workspace_btts():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("btts", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="btts",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="btts",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_metrics = _split_btts_counts(home_df)
+        away_metrics = _split_btts_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "BTTS Yes",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "BTTS No",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "btts",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_btts(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_btts(away_df, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/1x2_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_one_x_two_over_under():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("1x2_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            required_features = [
+                "goals_scored",
+                "opponent_goals",
+                "total_goals",
+                "penalty_goals_home",
+                "penalty_goals_away",
+                "total_penalty_goals",
+            ]
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="1x2_ou",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="1x2_ou",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_ou_metrics = _split_over_under_counts(home_df, line)
+        away_ou_metrics = _split_over_under_counts(away_df, line)
+        home_result_metrics = _split_result_counts_from_goals(home_df)
+        away_result_metrics = _split_result_counts_from_goals(away_df)
+
+        home_metrics = {**home_ou_metrics, **home_result_metrics}
+        away_metrics = {**away_ou_metrics, **away_result_metrics}
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_ou_metrics["over"],
+                "away_count": away_ou_metrics["over"],
+                "total": home_ou_metrics["over"] + away_ou_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_ou_metrics["under"],
+                "away_count": away_ou_metrics["under"],
+                "total": home_ou_metrics["under"] + away_ou_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "1x2_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_one_x_two_over_under(
+                    home_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+                "away": _build_recent_matches_one_x_two_over_under(
+                    away_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/double_chance_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_double_chance_over_under():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("double_chance_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            required_features = [
+                "goals_scored",
+                "opponent_goals",
+                "total_goals",
+                "penalty_goals_home",
+                "penalty_goals_away",
+                "total_penalty_goals",
+            ]
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="double_chance_ou",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="double_chance_ou",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_ou_metrics = _split_over_under_counts(home_df, line)
+        away_ou_metrics = _split_over_under_counts(away_df, line)
+        home_dc_metrics = _split_double_chance_counts(home_df)
+        away_dc_metrics = _split_double_chance_counts(away_df)
+
+        home_metrics = {**home_ou_metrics, **home_dc_metrics}
+        away_metrics = {**away_ou_metrics, **away_dc_metrics}
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_ou_metrics["over"],
+                "away_count": away_ou_metrics["over"],
+                "total": home_ou_metrics["over"] + away_ou_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_ou_metrics["under"],
+                "away_count": away_ou_metrics["under"],
+                "total": home_ou_metrics["under"] + away_ou_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "double_chance_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_double_chance_over_under(
+                    home_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+                "away": _build_recent_matches_double_chance_over_under(
+                    away_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/btts_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_btts_over_under():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("btts_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            required_features = [
+                "goals_scored",
+                "opponent_goals",
+                "total_goals",
+                "penalty_goals_home",
+                "penalty_goals_away",
+                "total_penalty_goals",
+            ]
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="btts_ou",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="btts_ou",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_ou_metrics = _split_over_under_counts(home_df, line)
+        away_ou_metrics = _split_over_under_counts(away_df, line)
+        home_btts_metrics = _split_btts_counts(home_df)
+        away_btts_metrics = _split_btts_counts(away_df)
+
+        home_metrics = {**home_ou_metrics, **home_btts_metrics}
+        away_metrics = {**away_ou_metrics, **away_btts_metrics}
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_ou_metrics["over"],
+                "away_count": away_ou_metrics["over"],
+                "total": home_ou_metrics["over"] + away_ou_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_ou_metrics["under"],
+                "away_count": away_ou_metrics["under"],
+                "total": home_ou_metrics["under"] + away_ou_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "btts_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_btts_over_under(
+                    home_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+                "away": _build_recent_matches_btts_over_under(
+                    away_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/first_half_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_first_half_over_under():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("first_half_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 1.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            required_features = [
+                "team_h1_goals",
+                "opponent_h1_goals",
+            ]
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="first_half_ou",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="first_half_ou",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_first_half_over_under_counts(home_df, line)
+        away_metrics = _split_first_half_over_under_counts(away_df, line)
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_metrics["over"],
+                "away_count": away_metrics["over"],
+                "total": home_metrics["over"] + away_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_metrics["under"],
+                "away_count": away_metrics["under"],
+                "total": home_metrics["under"] + away_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "first_half_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_first_half_over_under(
+                    home_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+                "away": _build_recent_matches_first_half_over_under(
+                    away_df,
+                    line,
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/first_half_1x2", methods=["POST", "OPTIONS"])
+    def get_workspace_first_half_one_x_two():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("first_half_1x2", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            required_features = [
+                "team_h1_goals",
+                "opponent_h1_goals",
+            ]
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="first_half_1x2",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="first_half_1x2",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=required_features,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_first_half_result_counts(home_df)
+        away_metrics = _split_first_half_result_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Win",
+                "home_count": home_metrics["wins"],
+                "away_count": away_metrics["wins"],
+                "total": home_metrics["wins"] + away_metrics["wins"],
+            },
+            {
+                "label": "Draw",
+                "home_count": home_metrics["draws"],
+                "away_count": away_metrics["draws"],
+                "total": home_metrics["draws"] + away_metrics["draws"],
+            },
+            {
+                "label": "Loss",
+                "home_count": home_metrics["losses"],
+                "away_count": away_metrics["losses"],
+                "total": home_metrics["losses"] + away_metrics["losses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "first_half_1x2",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_first_half_one_x_two(
+                    home_df,
+                    league_id=league_id_for_ranking,
+                ),
+                "away": _build_recent_matches_first_half_one_x_two(
+                    away_df,
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/win_either_half", methods=["POST", "OPTIONS"])
+    def get_workspace_win_either_half():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("win_either_half", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="win_either_half",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals", "goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="win_either_half",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals", "goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_win_either_half_counts(home_df)
+        away_metrics = _split_win_either_half_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Won Half Yes",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "Won Half No",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "win_either_half",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_weh(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_weh(away_df, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/win_both_halves", methods=["POST", "OPTIONS"])
+    def get_workspace_win_both_halves():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("win_both_halves", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = DoubleChanceWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="win_both_halves",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals", "goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="win_both_halves",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["team_h1_goals", "opponent_h1_goals", "team_h2_goals", "opponent_h2_goals", "goals_scored", "opponent_goals"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_win_both_halves_counts(home_df)
+        away_metrics = _split_win_both_halves_counts(away_df)
+
+        chart_series = [
+            {
+                "label": "Won Both Yes",
+                "home_count": home_metrics["hits"],
+                "away_count": away_metrics["hits"],
+                "total": home_metrics["hits"] + away_metrics["hits"],
+            },
+            {
+                "label": "Won Both No",
+                "home_count": home_metrics["misses"],
+                "away_count": away_metrics["misses"],
+                "total": home_metrics["misses"] + away_metrics["misses"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "win_both_halves",
+                "match_id": requested_match_id,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_wbh(home_df, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_wbh(away_df, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/home_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_home_ou():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("home_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_request = EvidenceRequest(
+                    match_id=home_anchor_match_id,
+                    bet_type="home_ou",
+                    perspective=home_perspective,
+                    filters=filters,
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = store.query(home_request).df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = pd.DataFrame()
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            home_df = _apply_npg_adjustment(home_df)
+            notes.append("npg_toggle=on")
+
+        home_metrics = _split_over_under_counts_for_column(home_df, line, "goals_scored")
+        away_metrics = {"over": 0, "under": 0}
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_metrics["over"],
+                "away_count": away_metrics["over"],
+                "total": home_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_metrics["under"],
+                "away_count": away_metrics["under"],
+                "total": home_metrics["under"],
+            },
+        ]
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = 0
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+        response = {
+            "workspace": {
+                "bet_type": "home_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": home_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": _build_recent_matches_team_goals_over_under(
+                    home_df,
+                    line,
+                    goals_column="goals_scored",
+                    league_id=league_id_for_ranking,
+                ),
+                "away": [],
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/away_ou", methods=["POST", "OPTIONS"])
+    def get_workspace_away_ou():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("away_ou", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 2.5)
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        away_df = pd.DataFrame()
+        notes: list[str] = [
+            "real backend evidence request",
+            f"fixtures_source={snapshot.source}",
+            f"line={line}",
+        ]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            filter_validator = OverUnderWorkspace(store)
+            filter_validator.validate_filters(filters)
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_request = EvidenceRequest(
+                    match_id=away_anchor_match_id,
+                    bet_type="away_ou",
+                    perspective=away_perspective,
+                    filters=filters,
+                    required_features=["goals_scored", "opponent_goals", "penalty_goals_home", "penalty_goals_away"],
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = store.query(away_request).df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        away_df = _sort_team_history(away_df)
+        home_df = pd.DataFrame()
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        npg_toggle = bool(ranking_filters_payload.get("npg_toggle", False))
+        if npg_toggle:
+            away_df = _apply_npg_adjustment(away_df)
+            notes.append("npg_toggle=on")
+
+        home_metrics = {"over": 0, "under": 0}
+        away_metrics = _split_over_under_counts_for_column(away_df, line, "goals_scored")
+
+        chart_series = [
+            {
+                "label": "Over",
+                "home_count": home_metrics["over"],
+                "away_count": away_metrics["over"],
+                "total": away_metrics["over"],
+            },
+            {
+                "label": "Under",
+                "home_count": home_metrics["under"],
+                "away_count": away_metrics["under"],
+                "total": away_metrics["under"],
+            },
+        ]
+
+        home_sample_size = 0
+        away_sample_size = int(len(away_df))
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+        response = {
+            "workspace": {
+                "bet_type": "away_ou",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": away_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": chart_series,
+            "recent_matches": {
+                "home": [],
+                "away": _build_recent_matches_team_goals_over_under(
+                    away_df,
+                    line,
+                    goals_column="goals_scored",
+                    league_id=league_id_for_ranking,
+                ),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/corners", methods=["POST", "OPTIONS"])
+    def get_workspace_corners():
+        if request.method == "OPTIONS":
+            return ("", 204)
+
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key("corners", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 8.5)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        home_df = pd.DataFrame()
+        away_df = pd.DataFrame()
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}", f"line={line}"]
+
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+            home_anchor = _resolve_team_anchor_match(
+                raw_df,
+                home_team_id,
+                home_team_name,
+                "home",
+                league_id=league_id_for_ranking,
+            )
+            away_anchor = _resolve_team_anchor_match(
+                raw_df,
+                away_team_id,
+                away_team_name,
+                "away",
+                league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            workspace = CornerWorkspace(store)
+
+            if home_anchor is not None:
+                home_anchor_match_id, home_perspective = home_anchor
+                home_evidence = workspace.get_evidence(
+                    match_id=home_anchor_match_id,
+                    bet_type="corners",
+                    filters=filters,
+                    perspective=home_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                home_df = home_evidence.df
+                notes.append(f"home_anchor={home_anchor_match_id}:{home_perspective}")
+            else:
+                notes.append(f"home_team_unavailable={home_team_name or home_team_id}")
+
+            if away_anchor is not None:
+                away_anchor_match_id, away_perspective = away_anchor
+                away_evidence = workspace.get_evidence(
+                    match_id=away_anchor_match_id,
+                    bet_type="corners",
+                    filters=filters,
+                    perspective=away_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                away_df = away_evidence.df
+                notes.append(f"away_anchor={away_anchor_match_id}:{away_perspective}")
+            else:
+                notes.append(f"away_team_unavailable={away_team_name or away_team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        home_df = _sort_team_history(home_df)
+        away_df = _sort_team_history(away_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        home_df = _apply_opponent_rank_filters(
+            home_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_opponent_rank_filters(
+            away_df,
+            ranking_filters_payload,
+            league_id_for_ranking,
+            notes=notes,
+            side_label="away",
+        )
+        home_df = _apply_similar_teams_filter(
+            home_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=away_team_name,
+            notes=notes,
+            side_label="home",
+        )
+        away_df = _apply_similar_teams_filter(
+            away_df,
+            ranking_filters_payload,
+            anchor_opponent_team_name=home_team_name,
+            notes=notes,
+            side_label="away",
+        )
+
+        home_metrics = _split_corner_metrics(home_df, line)
+        away_metrics = _split_corner_metrics(away_df, line)
+
+        home_sample_size = int(len(home_df))
+        away_sample_size = int(len(away_df))
+        primary_sample_size = home_sample_size if home_sample_size > 0 else away_sample_size
+        opponent_ranks = _build_opponent_rank_payload(
+            league_id_for_ranking,
+            home_team_name,
+            away_team_name,
+        )
+
+        response = {
+            "workspace": {
+                "bet_type": "corners",
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": primary_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": [
+                {
+                    "label": "Over",
+                    "home_count": home_metrics["over"],
+                    "away_count": away_metrics["over"],
+                    "total": home_metrics["over"] + away_metrics["over"],
+                },
+                {
+                    "label": "Under",
+                    "home_count": home_metrics["under"],
+                    "away_count": away_metrics["under"],
+                    "total": home_metrics["under"] + away_metrics["under"],
+                },
+            ],
+            "recent_matches": {
+                "home": _build_recent_matches_corners(home_df, line, league_id=league_id_for_ranking),
+                "away": _build_recent_matches_corners(away_df, line, league_id=league_id_for_ranking),
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    # ── Home / Away Corners endpoints ──────────────────────────────────────
+
+    def _handle_side_corners(side: str):
+        """Shared handler for home_corners and away_corners workspaces.
+
+        Like home_ou / away_ou, only queries the relevant team's history.
+        """
+        payload = request.get_json(silent=True) or {}
+        requested_match_id = _safe_int(payload.get("match_id"), -1)
+        if requested_match_id < 0:
+            return jsonify({"error": "match_id is required"}), 400
+
+        # Check server-side response cache
+        cache_key = _workspace_cache_key(f"{side}_corners", payload)
+        cached = _get_cached_workspace(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+        line = _safe_float(payload.get("line"), 4.5)
+
+        snapshot = _get_nonblocking_fixture_snapshot()
+        fixture = _resolve_fixture_for_match(snapshot, requested_match_id)
+
+        home_team_id = _safe_int(payload.get("home_team_id"), fixture.home_team_id if fixture else -1)
+        away_team_id = _safe_int(payload.get("away_team_id"), fixture.away_team_id if fixture else -1)
+        home_team_name = payload.get("home_team_name") or (fixture.home_team_name if fixture else "")
+        away_team_name = payload.get("away_team_name") or (fixture.away_team_name if fixture else "")
+        requested_league_id = str(payload.get("league_id", "") or "").strip()
+        league_id_for_ranking = requested_league_id or (fixture.league_id if fixture is not None else "")
+        if home_team_id < 0 or away_team_id < 0:
+            return jsonify({"error": "home_team_id and away_team_id are required"}), 400
+
+        bet_type = f"{side}_corners"
+        notes: list[str] = ["real backend evidence request", f"fixtures_source={snapshot.source}", f"line={line}"]
+
+        WorkspaceClass = HomeCornerWorkspace if side == "home" else AwayCornerWorkspace
+
+        # Only query the relevant team (home_corners → home team, away_corners → away team)
+        team_df = pd.DataFrame()
+        try:
+            filters = _parse_filters(payload)
+            raw_df = _load_raw_df()
+
+            if side == "home":
+                team_id, team_name, anchor_side = home_team_id, home_team_name, "home"
+            else:
+                team_id, team_name, anchor_side = away_team_id, away_team_name, "away"
+
+            anchor = _resolve_team_anchor_match(
+                raw_df, team_id, team_name, anchor_side, league_id=league_id_for_ranking,
+            )
+
+            store = _build_store()
+            workspace = WorkspaceClass(store)
+
+            if anchor is not None:
+                anchor_match_id, anchor_perspective = anchor
+                evidence = workspace.get_evidence(
+                    match_id=anchor_match_id,
+                    bet_type=bet_type,
+                    filters=filters,
+                    perspective=anchor_perspective,
+                    line=line,
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                team_df = evidence.df
+                notes.append(f"{side}_anchor={anchor_match_id}:{anchor_perspective}")
+            else:
+                notes.append(f"{side}_team_unavailable={team_name or team_id}")
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        team_df = _sort_team_history(team_df)
+        ranking_filters_payload = payload.get("filters") if isinstance(payload.get("filters"), dict) else {}
+        opponent_team_name = away_team_name if side == "home" else home_team_name
+        team_df = _apply_opponent_rank_filters(
+            team_df, ranking_filters_payload, league_id_for_ranking, notes=notes, side_label=side,
+        )
+        team_df = _apply_similar_teams_filter(
+            team_df, ranking_filters_payload, anchor_opponent_team_name=opponent_team_name, notes=notes, side_label=side,
+        )
+
+        team_metrics = _split_side_corner_metrics(team_df, line, side)
+        empty_metrics = {"matches": 0, "avg_corners": 0.0, "min_corners": 0.0, "max_corners": 0.0, "over": 0, "under": 0}
+
+        team_sample_size = int(len(team_df))
+        opponent_ranks = _build_opponent_rank_payload(league_id_for_ranking, home_team_name, away_team_name)
+
+        if side == "home":
+            home_metrics, away_metrics = team_metrics, empty_metrics
+            home_sample_size, away_sample_size = team_sample_size, 0
+            recent_home = _build_recent_matches_side_corners(team_df, line, side, league_id=league_id_for_ranking)
+            recent_away: list = []
+        else:
+            home_metrics, away_metrics = empty_metrics, team_metrics
+            home_sample_size, away_sample_size = 0, team_sample_size
+            recent_home: list = []
+            recent_away = _build_recent_matches_side_corners(team_df, line, side, league_id=league_id_for_ranking)
+
+        response = {
+            "workspace": {
+                "bet_type": bet_type,
+                "match_id": requested_match_id,
+                "line": line,
+                "as_of": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "sample_size": team_sample_size,
+            "sample_sizes": {
+                "home_team": home_sample_size,
+                "away_team": away_sample_size,
+            },
+            "metrics": {
+                "home_team": home_metrics,
+                "away_team": away_metrics,
+            },
+            "chartSeries": [
+                {
+                    "label": "Over",
+                    "home_count": home_metrics["over"],
+                    "away_count": away_metrics["over"],
+                    "total": team_metrics["over"],
+                },
+                {
+                    "label": "Under",
+                    "home_count": home_metrics["under"],
+                    "away_count": away_metrics["under"],
+                    "total": team_metrics["under"],
+                },
+            ],
+            "recent_matches": {
+                "home": recent_home,
+                "away": recent_away,
+            },
+            "opponent_ranks": opponent_ranks,
+            "notes": notes,
+        }
+        _set_cached_workspace(cache_key, response)
+        return jsonify(response)
+
+    @app.route("/api/workspace/home_corners", methods=["POST", "OPTIONS"])
+    def get_workspace_home_corners():
+        if request.method == "OPTIONS":
+            return ("", 204)
+        return _handle_side_corners("home")
+
+    @app.route("/api/workspace/away_corners", methods=["POST", "OPTIONS"])
+    def get_workspace_away_corners():
+        if request.method == "OPTIONS":
+            return ("", 204)
+        return _handle_side_corners("away")
+
+    # ── Chat endpoint (intent → workspace → explain) ────────────────────────
+    _chat_orchestrator: Any = None
+
+    @app.route("/api/chat/stream", methods=["POST", "OPTIONS"])
+    def chat_stream():
+        """
+        Natural-language chat that queries the kitchen workspaces internally.
+        Streams the LLM explanation as plain text chunks.
+        """
+        nonlocal _chat_orchestrator
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.chat_orchestrator import ChatOrchestrator, ChatRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        if _chat_orchestrator is None:
+            _chat_orchestrator = ChatOrchestrator()
+
+        chat_request = ChatRequest(
+            query=query_text,
+            history=body.get("history", []),
+            home_team_id=_safe_int(body.get("home_team_id"), None),
+            away_team_id=_safe_int(body.get("away_team_id"), None),
+            home_team_name=body.get("home_team_name", ""),
+            away_team_name=body.get("away_team_name", ""),
+            league_id=body.get("league_id", ""),
+        )
+
+        def generate():
+            try:
+                for chunk in _chat_orchestrator.stream(chat_request):
+                    yield chunk
+            except Exception as exc:
+                yield f"\n\n[Error: {exc}]"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/plain",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    # ── Bet slip analysis endpoint ────────────────────────────────────────────
+    _betslip_analyzer: Any = None
+
+    @app.route("/api/betslip/analyze", methods=["POST", "OPTIONS"])
+    def betslip_analyze():
+        """
+        Upload a bet slip image for OCR + workspace analysis.
+        Accepts multipart/form-data with an 'image' file and optional 'league_id'.
+        Streams newline-delimited JSON events.
+        """
+        nonlocal _betslip_analyzer
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.betslip_analyzer import BetSlipAnalyzer
+
+        image_file = request.files.get("image")
+        if not image_file:
+            return jsonify({"error": "image file is required"}), 400
+
+        league_id = request.form.get("league_id", "")
+        mime_type = image_file.content_type or "image/png"
+
+        import base64
+        image_b64 = base64.b64encode(image_file.read()).decode("utf-8")
+
+        if _betslip_analyzer is None:
+            _betslip_analyzer = BetSlipAnalyzer()
+
+        def generate():
+            try:
+                for event in _betslip_analyzer.analyze_slip(
+                    image_b64, mime_type=mime_type, league_id=league_id,
+                ):
+                    yield event
+            except Exception as exc:
+                yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    # ── RAG query endpoint (legacy) ───────────────────────────────────────────
+    _rag_pipeline: Any = None  # lazy-init on first request
+
+    @app.route("/api/rag/ingest", methods=["POST"])
+    def rag_ingest():
+        """
+        Ingest all CSV rows into the ChromaDB vector store.
+        Call this once after new data arrives. Idempotent (upsert).
+        """
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+
+        try:
+            df = _load_all_season_dfs()
+            rows = df.to_dict("records")
+            docs = build_documents(rows)
+
+            store = MatchVectorStore()
+            count = store.ingest(docs)
+            return jsonify({"status": "ok", "ingested": count, "total_in_store": store.count})
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    @app.route("/api/rag/query", methods=["POST", "OPTIONS"])
+    def rag_query():
+        """
+        Natural-language query against match history.
+
+        Body (JSON):
+            query         str   required  — the user's question
+            home_team_id  str   optional  — focus on matches involving this team
+            away_team_id  str   optional  — focus on matches involving this team
+            n_results     int   optional  — number of docs to retrieve (default 12)
+            extra_context str   optional  — additional text prepended to the prompt
+        """
+        nonlocal _rag_pipeline
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+        from backend.rag.rag_pipeline import RAGPipeline, RAGRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        # Lazy-init: build store + pipeline on first call
+        if _rag_pipeline is None:
+            store = MatchVectorStore()
+            if store.count == 0:
+                # Auto-ingest on first query if store is empty
+                try:
+                    df = _load_all_season_dfs()
+                    docs = build_documents(df.to_dict("records"))
+                    store.ingest(docs)
+                except Exception as exc:
+                    return jsonify({"error": f"Auto-ingest failed: {exc}"}), 500
+            _rag_pipeline = RAGPipeline(vector_store=store)
+
+        rag_request = RAGRequest(
+            query=query_text,
+            home_team_id=body.get("home_team_id") or None,
+            away_team_id=body.get("away_team_id") or None,
+            n_results=int(body.get("n_results", 12)),
+            extra_context=body.get("extra_context", ""),
+        )
+
+        try:
+            result = _rag_pipeline.run(rag_request)
+            return jsonify({
+                "answer": result.answer,
+                "match_count": result.match_count,
+                "matches": [
+                    {"id": m["id"], "metadata": m["metadata"]}
+                    for m in result.retrieved_matches
+                ],
+            })
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+
+    # â"€â"€ Serve frontend SPA â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+
+    @app.route("/api/rag/stream", methods=["POST", "OPTIONS"])
+    def rag_stream():
+        """
+        Same as /api/rag/query but streams Claude response as plain text chunks.
+        The client reads the response body progressively via fetch + ReadableStream.
+        """
+        nonlocal _rag_pipeline
+
+        if request.method == "OPTIONS":
+            return "", 204
+
+        from backend.rag.document_builder import build_documents
+        from backend.rag.vector_store import MatchVectorStore
+        from backend.rag.rag_pipeline import RAGPipeline, RAGRequest
+
+        body = request.get_json(silent=True) or {}
+        query_text = (body.get("query") or "").strip()
+        if not query_text:
+            return jsonify({"error": "query is required"}), 400
+
+        if _rag_pipeline is None:
+            store = MatchVectorStore()
+            if store.count == 0:
+                try:
+                    df = _load_all_season_dfs()
+                    docs = build_documents(df.to_dict("records"))
+                    store.ingest(docs)
+                except Exception as exc:
+                    return jsonify({"error": f"Auto-ingest failed: {exc}"}), 500
+            _rag_pipeline = RAGPipeline(vector_store=store)
+
+        rag_request = RAGRequest(
+            query=query_text,
+            home_team_id=body.get("home_team_id") or None,
+            away_team_id=body.get("away_team_id") or None,
+            n_results=int(body.get("n_results", 12)),
+            extra_context=body.get("extra_context", ""),
+        )
+
+        pipeline = _rag_pipeline
+
+        def generate():
+            try:
+                for chunk in pipeline.stream(rag_request):
+                    yield chunk
+            except Exception as exc:
+                yield f"\n\n[Error: {exc}]"
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/plain",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def serve_frontend(path):
+        from flask import send_from_directory
+        if path and (FRONTEND_DIST / path).is_file():
+            return send_from_directory(str(FRONTEND_DIST), path)
+        index_path = FRONTEND_DIST / "index.html"
+        if index_path.is_file():
+            return send_from_directory(str(FRONTEND_DIST), "index.html")
+        return "Frontend not built. Run: cd frontend && npm install && npm run build", 404
+
+    return app
+
+
+app = create_app()
+
+# Pre-warm expensive caches so the first request doesn't pay the cold-start cost.
+try:
+    _load_raw_df()
+    _build_store()
+    _match_name_index()
+    _match_datetime_index()
+except Exception:
+    pass  # Non-fatal — will retry on first request
+
+
+def _start_keep_alive():
+    """Ping own /api/health every 14 minutes to prevent Render cold-start spin-down."""
+    import threading
+    import time
+
+    self_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not self_url:
+        return  # Only runs on Render
+
+    def _ping():
+        while True:
+            time.sleep(14 * 60)
+            try:
+                urlopen(Request(f"{self_url}/api/health"), timeout=10)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_ping, daemon=True)
+    t.start()
+
+_start_keep_alive()
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
+

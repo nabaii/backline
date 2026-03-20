@@ -1,0 +1,711 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import api from '../api/backendApi'
+import FilterDropdown from './FilterDropdown'
+import ChartArea from './ChartArea'
+import MetricsPanel from './MetricsPanel'
+import WorkspaceLoadingPlaceholder from './WorkspaceLoadingPlaceholder'
+
+const OVER_UNDER_LINE_STEP = 0.5
+const OVER_UNDER_LINE_MIN = 0.5
+const OVER_UNDER_LINE_MAX = 8.5
+const DEFAULT_OVER_UNDER_LINE = 2.5
+const CORNERS_LINE_STEP = 0.5
+const CORNERS_LINE_MIN = 0.5
+const CORNERS_LINE_MAX = 20.5
+const DEFAULT_CORNERS_LINE = 8.5
+const DEFAULT_CHART_TEAM_VIEW = 'both'
+const BET_TYPE_ONE_X_TWO = '1X2'
+const BET_TYPE_OVER_UNDER = 'over_under'
+const BET_TYPE_DOUBLE_CHANCE = 'double_chance'
+const BET_TYPE_BTTS = 'btts'
+const BET_TYPE_ONE_X_TWO_OU = '1x2_ou'
+const BET_TYPE_DOUBLE_CHANCE_OU = 'double_chance_ou'
+const BET_TYPE_BTTS_OU = 'btts_ou'
+const BET_TYPE_FIRST_HALF_OU = 'first_half_ou'
+const BET_TYPE_FIRST_HALF_1X2 = 'first_half_1x2'
+const BET_TYPE_HOME_OU = 'home_ou'
+const BET_TYPE_AWAY_OU = 'away_ou'
+const BET_TYPE_CORNERS = 'corners'
+const BET_TYPE_HOME_CORNERS = 'home_corners'
+const BET_TYPE_AWAY_CORNERS = 'away_corners'
+const BET_TYPE_WIN_EITHER_HALF = 'win_either_half'
+const BET_TYPE_WIN_BOTH_HALVES = 'win_both_halves'
+
+function defaultTeamViewForBetType(betType) {
+  if (betType === BET_TYPE_HOME_OU || betType === BET_TYPE_HOME_CORNERS) return 'home'
+  if (betType === BET_TYPE_AWAY_OU || betType === BET_TYPE_AWAY_CORNERS) return 'away'
+  return DEFAULT_CHART_TEAM_VIEW
+}
+
+const MOBILE_SCREEN_BREAKPOINT = 700
+
+function createDefaultFilters() {
+  const isMobile = typeof window !== 'undefined' && window.innerWidth <= MOBILE_SCREEN_BREAKPOINT
+  return {
+    home_away: 'all',
+    h2h: false,
+    team_momentum_range: [0, 10],
+    opponent_momentum_range: [0, 10],
+    total_match_goals_range: [0, 10],
+    team_goals_range: [0, 10],
+    opposition_goals_range: [0, 10],
+    team_xg_range: [0, 5],
+    opposition_xg_range: [0, 5],
+    total_xg_range: [0, 10],
+    team_possession_range: [0, 100],
+    opposition_possession_range: [0, 100],
+    field_tilt_range: [0, 1],
+    opponent_rank_xgd_range: [1, 20],
+    opponent_rank_xgf_range: [1, 20],
+    opponent_rank_xga_range: [1, 20],
+    opponent_rank_position_range: [1, 20],
+    opponent_rank_corners_range: [1, 20],
+    opponent_rank_momentum_range: [1, 20],
+    opponent_rank_possession_range: [1, 20],
+    similar_teams_mode: 'off',
+    npg_toggle: false,
+    shot_xg_threshold: 0.3,
+    shot_xg_min_shots: 0,
+    games_mode: isMobile ? '10' : '20',
+    games_count: isMobile ? 10 : 20,
+  }
+}
+
+function normalizeOverUnderLine(rawValue) {
+  const numeric = Number(rawValue)
+  if (Number.isNaN(numeric)) return DEFAULT_OVER_UNDER_LINE
+  const clamped = Math.min(OVER_UNDER_LINE_MAX, Math.max(OVER_UNDER_LINE_MIN, numeric))
+  return Math.round(clamped / OVER_UNDER_LINE_STEP) * OVER_UNDER_LINE_STEP
+}
+
+function normalizeCornersLine(rawValue) {
+  const numeric = Number(rawValue)
+  if (Number.isNaN(numeric)) return DEFAULT_CORNERS_LINE
+  const clamped = Math.min(CORNERS_LINE_MAX, Math.max(CORNERS_LINE_MIN, numeric))
+  return Math.round(clamped / CORNERS_LINE_STEP) * CORNERS_LINE_STEP
+}
+
+function buildEvidenceFilters(filters) {
+  const evidenceFilters = []
+
+  if (filters.home_away && filters.home_away !== 'all') {
+    evidenceFilters.push({
+      key: 'venue',
+      kind: 'column',
+      field: 'venue',
+      operator: '==',
+      value: filters.home_away,
+      display_name: 'Match Venue',
+      required_columns: ['venue'],
+    })
+  }
+
+  if (Array.isArray(filters.team_momentum_range) && filters.team_momentum_range.length === 2) {
+    evidenceFilters.push({
+      key: 'team_momentum',
+      kind: 'column',
+      field: 'home_momentum',
+      operator: 'between',
+      value: filters.team_momentum_range,
+      display_name: 'Team Momentum',
+      required_columns: ['home_momentum', 'away_momentum'],
+    })
+  }
+
+  if (Array.isArray(filters.opponent_momentum_range) && filters.opponent_momentum_range.length === 2) {
+    evidenceFilters.push({
+      key: 'opponent_momentum',
+      kind: 'column',
+      field: 'away_momentum',
+      operator: 'between',
+      value: filters.opponent_momentum_range,
+      display_name: 'Opponent Momentum',
+      required_columns: ['home_momentum', 'away_momentum'],
+    })
+  }
+
+  if (Array.isArray(filters.total_match_goals_range) && filters.total_match_goals_range.length === 2) {
+    evidenceFilters.push({
+      key: 'total_match_goals',
+      kind: 'column',
+      field: 'total_goals',
+      operator: 'between',
+      value: filters.total_match_goals_range,
+      display_name: 'Total Match Goals',
+      required_columns: ['total_goals'],
+    })
+  }
+
+  if (Array.isArray(filters.team_goals_range) && filters.team_goals_range.length === 2) {
+    evidenceFilters.push({
+      key: 'goals_scored',
+      kind: 'column',
+      field: 'goals_scored',
+      operator: 'between',
+      value: filters.team_goals_range,
+      display_name: 'Team Goals',
+      required_columns: ['goals_scored', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.opposition_goals_range) && filters.opposition_goals_range.length === 2) {
+    evidenceFilters.push({
+      key: 'goals_conceded',
+      kind: 'column',
+      field: 'opponent_goals',
+      operator: 'between',
+      value: filters.opposition_goals_range,
+      display_name: 'Opposition Goals',
+      required_columns: ['opponent_goals', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.team_xg_range) && filters.team_xg_range.length === 2) {
+    evidenceFilters.push({
+      key: 'team_xg',
+      kind: 'column',
+      field: 'team_xg',
+      operator: 'between',
+      value: filters.team_xg_range,
+      display_name: 'Team xG',
+      required_columns: ['expected_goals_home', 'expected_goals_away', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.opposition_xg_range) && filters.opposition_xg_range.length === 2) {
+    evidenceFilters.push({
+      key: 'opponent_xg',
+      kind: 'column',
+      field: 'opponent_xg',
+      operator: 'between',
+      value: filters.opposition_xg_range,
+      display_name: 'Opposition xG',
+      required_columns: ['expected_goals_home', 'expected_goals_away', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.total_xg_range) && filters.total_xg_range.length === 2) {
+    evidenceFilters.push({
+      key: 'total_xg',
+      kind: 'column',
+      field: 'total_xg',
+      operator: 'between',
+      value: filters.total_xg_range,
+      display_name: 'Total xG',
+      required_columns: ['expected_goals_home', 'expected_goals_away'],
+    })
+  }
+
+  if (Array.isArray(filters.team_possession_range) && filters.team_possession_range.length === 2) {
+    evidenceFilters.push({
+      key: 'team_possession',
+      kind: 'column',
+      field: 'ball_possession_home',
+      operator: 'between',
+      value: filters.team_possession_range,
+      display_name: 'Team Possession',
+      required_columns: ['ball_possession_home', 'ball_possession_away', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.opposition_possession_range) && filters.opposition_possession_range.length === 2) {
+    evidenceFilters.push({
+      key: 'opponent_possession',
+      kind: 'column',
+      field: 'ball_possession_away',
+      operator: 'between',
+      value: filters.opposition_possession_range,
+      display_name: 'Opponent Possession',
+      required_columns: ['ball_possession_home', 'ball_possession_away', 'venue'],
+    })
+  }
+
+  if (Array.isArray(filters.field_tilt_range) && filters.field_tilt_range.length === 2) {
+    evidenceFilters.push({
+      key: 'field_tilt',
+      kind: 'column',
+      field: 'field_tilt_home',
+      operator: 'between',
+      value: filters.field_tilt_range,
+      display_name: 'Field Tilt',
+      required_columns: ['field_tilt_home', 'field_tilt_away', 'venue'],
+    })
+  }
+
+  const shotXgThreshold = Number(filters.shot_xg_threshold)
+  const shotXgMinShots = Number(filters.shot_xg_min_shots)
+  if (Number.isFinite(shotXgThreshold) && Number.isFinite(shotXgMinShots) && shotXgMinShots > 0) {
+    evidenceFilters.push({
+      key: 'team_shot_xg',
+      kind: 'column',
+      field: 'home_shots',
+      operator: '>=',
+      value: {
+        min_xg: shotXgThreshold,
+        min_shots: Math.max(0, Math.floor(shotXgMinShots)),
+      },
+      display_name: 'Team Shot xG Count',
+      required_columns: ['home_shots', 'away_shots', 'venue'],
+    })
+  }
+
+  const gamesMode = String(filters.games_mode || 'max').trim().toLowerCase()
+  if (gamesMode !== 'max') {
+    const count = gamesMode === 'custom'
+      ? Math.max(1, Math.min(60, Math.floor(Number(filters.games_count) || 21)))
+      : Number(gamesMode)
+    if (Number.isFinite(count) && count > 0) {
+      evidenceFilters.push({
+        key: 'last_n_games',
+        kind: 'context',
+        field: null,
+        operator: '<=',
+        value: count,
+        display_name: 'Last N Games',
+        required_columns: [],
+      })
+    }
+  }
+
+  if (filters.h2h === true) {
+    evidenceFilters.push({
+      key: 'head_to_head',
+      kind: 'context',
+      field: null,
+      operator: '==',
+      value: true,
+      display_name: 'Head-To-Head',
+      required_columns: [],
+    })
+  }
+
+  return evidenceFilters
+}
+
+function buildWorkspaceCacheKey({
+  matchId,
+  homeTeamId,
+  awayTeamId,
+  homeTeamName,
+  awayTeamName,
+  leagueId,
+  betType,
+  filters,
+  overUnderLine,
+  cornersLine,
+}) {
+  return JSON.stringify({
+    matchId,
+    homeTeamId,
+    awayTeamId,
+    homeTeamName,
+    awayTeamName,
+    leagueId,
+    betType,
+    filters,
+    overUnderLine,
+    cornersLine,
+  })
+}
+
+export default function BetTypeWorkspace({
+  matchId,
+  homeTeamId,
+  awayTeamId,
+  homeTeamName,
+  awayTeamName,
+  homeTeamShortName,
+  awayTeamShortName,
+  leagueId,
+  initialBetType,
+}) {
+  const [betType, setBetType] = useState(initialBetType || BET_TYPE_ONE_X_TWO)
+  const [workspace, setWorkspace] = useState(null)
+  const [draftFilters, setDraftFilters] = useState(createDefaultFilters)
+  const [appliedFilters, setAppliedFilters] = useState(createDefaultFilters)
+  const [draftOverUnderLine, setDraftOverUnderLine] = useState(DEFAULT_OVER_UNDER_LINE)
+  const [appliedOverUnderLine, setAppliedOverUnderLine] = useState(DEFAULT_OVER_UNDER_LINE)
+  const [draftCornersLine, setDraftCornersLine] = useState(DEFAULT_CORNERS_LINE)
+  const [appliedCornersLine, setAppliedCornersLine] = useState(DEFAULT_CORNERS_LINE)
+  const [chartTeamView, setChartTeamView] = useState(DEFAULT_CHART_TEAM_VIEW)
+  const [isFiltersOpen, setIsFiltersOpen] = useState(false)
+  const [showGlossary, setShowGlossary] = useState(false)
+  const [activeOverlayFilters, setActiveOverlayFilters] = useState(() => new Set())
+  const [error, setError] = useState(null)
+  const workspaceCacheRef = useRef(new Map())
+  const seasonMatchesRef = useRef({})
+  const tabsScrollRef = useRef(null)
+  const [tabsWrapClass, setTabsWrapClass] = useState('')
+
+  useEffect(() => {
+    const el = tabsScrollRef.current
+    if (!el) return
+    function updateTabsFade() {
+      const overflowing = el.scrollWidth > el.clientWidth + 4
+      const scrolled = el.scrollLeft > 4
+      setTabsWrapClass([overflowing && 'tabs-overflowing', scrolled && 'tabs-scrolled'].filter(Boolean).join(' '))
+    }
+    updateTabsFade()
+    el.addEventListener('scroll', updateTabsFade, { passive: true })
+    const ro = new ResizeObserver(updateTabsFade)
+    ro.observe(el)
+    return () => { el.removeEventListener('scroll', updateTabsFade); ro.disconnect() }
+  }, [])
+  const hasPendingFilterChanges = useMemo(
+    () => JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters),
+    [draftFilters, appliedFilters]
+  )
+
+  // Sync betType when navigating from chat mini chart
+  useEffect(() => {
+    if (initialBetType) setBetType(initialBetType)
+  }, [initialBetType])
+
+  const applyFilters = () => {
+    if (!hasPendingFilterChanges) return
+    setAppliedFilters({ ...draftFilters })
+  }
+
+  const clearFilters = () => {
+    const defaults = createDefaultFilters()
+    setDraftFilters(defaults)
+    setAppliedFilters(defaults)
+  }
+
+  const updateOverUnderLineDraft = (nextValue) => {
+    setDraftOverUnderLine(normalizeOverUnderLine(nextValue))
+  }
+
+  const commitOverUnderLine = (nextValue) => {
+    const normalized = normalizeOverUnderLine(nextValue)
+    setDraftOverUnderLine(normalized)
+    setAppliedOverUnderLine(current => (current === normalized ? current : normalized))
+  }
+
+  const updateCornersLineDraft = (nextValue) => {
+    setDraftCornersLine(normalizeCornersLine(nextValue))
+  }
+
+  const commitCornersLine = (nextValue) => {
+    const normalized = normalizeCornersLine(nextValue)
+    setDraftCornersLine(normalized)
+    setAppliedCornersLine(current => (current === normalized ? current : normalized))
+  }
+
+  useEffect(() => {
+    if (!matchId || !homeTeamId || !awayTeamId) return
+    setError(null)
+    const evidenceFilters = buildEvidenceFilters(appliedFilters)
+    const cacheKey = buildWorkspaceCacheKey({
+      matchId,
+      homeTeamId,
+      awayTeamId,
+      homeTeamName,
+      awayTeamName,
+      leagueId,
+      betType,
+      filters: appliedFilters,
+      overUnderLine: appliedOverUnderLine,
+      cornersLine: appliedCornersLine,
+    })
+    const cachedWorkspace = workspaceCacheRef.current.get(cacheKey)
+    if (cachedWorkspace) {
+      setWorkspace(cachedWorkspace)
+      return
+    }
+
+    const requestPayload = {
+      match_id: matchId,
+      home_team_id: homeTeamId,
+      away_team_id: awayTeamId,
+      home_team_name: homeTeamName,
+      away_team_name: awayTeamName,
+      league_id: leagueId,
+      limit: 0,
+      filters: appliedFilters,
+      evidenceFilters,
+    }
+    const requestPromise = (() => {
+      if (betType === BET_TYPE_OVER_UNDER) {
+        return api.getWorkspaceOverUnder({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_DOUBLE_CHANCE) {
+        return api.getWorkspaceDoubleChance(requestPayload)
+      }
+      if (betType === BET_TYPE_BTTS) {
+        return api.getWorkspaceBtts(requestPayload)
+      }
+      if (betType === BET_TYPE_ONE_X_TWO_OU) {
+        return api.getWorkspace1X2Ou({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_DOUBLE_CHANCE_OU) {
+        return api.getWorkspaceDoubleChanceOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_BTTS_OU) {
+        return api.getWorkspaceBttsOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_FIRST_HALF_OU) {
+        return api.getWorkspaceFirstHalfOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_FIRST_HALF_1X2) {
+        return api.getWorkspaceFirstHalf1X2(requestPayload)
+      }
+      if (betType === BET_TYPE_WIN_EITHER_HALF) {
+        return api.getWorkspaceWinEitherHalf(requestPayload)
+      }
+      if (betType === BET_TYPE_WIN_BOTH_HALVES) {
+        return api.getWorkspaceWinBothHalves(requestPayload)
+      }
+      if (betType === BET_TYPE_CORNERS) {
+        return api.getWorkspaceCorners({ ...requestPayload, line: appliedCornersLine })
+      }
+      if (betType === BET_TYPE_HOME_CORNERS) {
+        return api.getWorkspaceHomeCorners({ ...requestPayload, line: appliedCornersLine })
+      }
+      if (betType === BET_TYPE_AWAY_CORNERS) {
+        return api.getWorkspaceAwayCorners({ ...requestPayload, line: appliedCornersLine })
+      }
+      if (betType === BET_TYPE_HOME_OU) {
+        return api.getWorkspaceHomeOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      if (betType === BET_TYPE_AWAY_OU) {
+        return api.getWorkspaceAwayOu({ ...requestPayload, line: appliedOverUnderLine })
+      }
+      return api.getWorkspace1X2(requestPayload)
+    })()
+
+    requestPromise
+      .then(r => {
+        workspaceCacheRef.current.set(cacheKey, r)
+        setWorkspace(r)
+        // Cache season matches from first (unfiltered) load per bet type
+        if (!seasonMatchesRef.current[betType] && r.recent_matches) {
+          seasonMatchesRef.current[betType] = r.recent_matches
+        }
+      })
+      .catch(err => {
+        setWorkspace(null)
+        setError(err?.message || 'Failed to load workspace')
+      })
+  }, [
+    matchId,
+    homeTeamId,
+    awayTeamId,
+    homeTeamName,
+    awayTeamName,
+    leagueId,
+    betType,
+    appliedFilters,
+    appliedOverUnderLine,
+    appliedCornersLine,
+  ])
+
+  useEffect(() => {
+    if (!matchId) return
+    setWorkspace(null)  // Clear stale data immediately to avoid mismatched chart/names
+    const defaults = createDefaultFilters()
+    setDraftFilters(defaults)
+    setAppliedFilters(defaults)
+    setChartTeamView(defaultTeamViewForBetType(betType))
+    seasonMatchesRef.current = {}
+  }, [matchId])
+
+  useEffect(() => {
+    setChartTeamView(defaultTeamViewForBetType(betType))
+  }, [betType])
+
+  if (error) {
+    return (
+      <div>
+        <div><strong>Workspace failed to load.</strong></div>
+        <div>{error}</div>
+      </div>
+    )
+  }
+
+  if (!workspace) return <WorkspaceLoadingPlaceholder activeBetType={betType} />
+
+  return (
+    <div className="bettype-workspace">
+      <div className={`workspace-header-wrap ${tabsWrapClass}`}>
+      <div className="workspace-header" ref={tabsScrollRef}>
+        <div className="bettabs">
+          <button className={betType === BET_TYPE_ONE_X_TWO ? 'active' : ''} onClick={() => setBetType(BET_TYPE_ONE_X_TWO)}>1X2</button>
+          <button className={betType === BET_TYPE_DOUBLE_CHANCE ? 'active' : ''} onClick={() => setBetType(BET_TYPE_DOUBLE_CHANCE)}>Double Chance</button>
+          <button className={betType === BET_TYPE_BTTS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_BTTS)}>BTTS</button>
+          <button className={betType === BET_TYPE_OVER_UNDER ? 'active' : ''} onClick={() => setBetType(BET_TYPE_OVER_UNDER)}>Over/Under</button>
+          <button className={betType === BET_TYPE_ONE_X_TWO_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_ONE_X_TWO_OU)}>1X2 + O/U</button>
+          <button className={betType === BET_TYPE_DOUBLE_CHANCE_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_DOUBLE_CHANCE_OU)}>Double Chance + O/U</button>
+          <button className={betType === BET_TYPE_BTTS_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_BTTS_OU)}>BTTS + O/U</button>
+          <button className={betType === BET_TYPE_FIRST_HALF_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_FIRST_HALF_OU)}>1st Half O/U</button>
+          <button className={betType === BET_TYPE_FIRST_HALF_1X2 ? 'active' : ''} onClick={() => setBetType(BET_TYPE_FIRST_HALF_1X2)}>1X2 1st Half</button>
+          <button className={betType === BET_TYPE_HOME_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_HOME_OU)}>Home O/U</button>
+          <button className={betType === BET_TYPE_AWAY_OU ? 'active' : ''} onClick={() => setBetType(BET_TYPE_AWAY_OU)}>Away O/U</button>
+          <button className={betType === BET_TYPE_CORNERS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_CORNERS)}>Corners</button>
+          <button className={betType === BET_TYPE_HOME_CORNERS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_HOME_CORNERS)}>Home Corners</button>
+          <button className={betType === BET_TYPE_AWAY_CORNERS ? 'active' : ''} onClick={() => setBetType(BET_TYPE_AWAY_CORNERS)}>Away Corners</button>
+          <button className={betType === BET_TYPE_WIN_EITHER_HALF ? 'active' : ''} onClick={() => setBetType(BET_TYPE_WIN_EITHER_HALF)}>Win Either Half</button>
+          <button className={betType === BET_TYPE_WIN_BOTH_HALVES ? 'active' : ''} onClick={() => setBetType(BET_TYPE_WIN_BOTH_HALVES)}>Win Both Halves</button>
+        </div>
+      </div>
+      </div>
+
+      <div className={`workspace-body ${isFiltersOpen ? 'filters-open' : 'filters-closed'}`}>
+        <div className="workspace-main">
+          <div className="workspace-chart-stack">
+            <ChartArea
+              recentMatches={workspace.recent_matches}
+              allSeasonMatches={seasonMatchesRef.current[betType] || null}
+              betType={workspace?.workspace?.bet_type || betType}
+              overUnderLine={draftOverUnderLine}
+              onOverUnderLineDraftChange={updateOverUnderLineDraft}
+              onOverUnderLineCommit={commitOverUnderLine}
+              cornersLine={draftCornersLine}
+              onCornersLineDraftChange={updateCornersLineDraft}
+              onCornersLineCommit={commitCornersLine}
+              teamView={chartTeamView}
+              isFiltersOpen={isFiltersOpen}
+              onToggleFilters={() => setIsFiltersOpen(current => !current)}
+              activeOverlayFilters={activeOverlayFilters}
+              opponentRanks={workspace?.opponent_ranks || null}
+              homeTeamShortName={homeTeamShortName}
+              awayTeamShortName={awayTeamShortName}
+            />
+            <div className="metrics-panel-desktop-wrap">
+              <MetricsPanel
+                betType={workspace?.workspace?.bet_type || betType}
+                metrics={workspace.metrics}
+                sampleSize={workspace.sample_size}
+                sampleSizes={workspace.sample_sizes}
+              />
+            </div>
+          </div>
+        </div>
+        <aside className={`filters-drawer ${isFiltersOpen ? 'open' : 'closed'}`}>
+          {isFiltersOpen ? (
+            <>
+              <div className="filters-drawer-header">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+                  <strong>Filters</strong>
+                  <button
+                    type="button"
+                    className="filter-help-icon"
+                    aria-label="Filter glossary"
+                    onClick={() => setShowGlossary(true)}
+                  >
+                    ?
+                  </button>
+                </div>
+                <button type="button" onClick={() => setIsFiltersOpen(false)}>✕</button>
+              </div>
+              <FilterDropdown
+                value={draftFilters}
+                onChange={setDraftFilters}
+                onApply={applyFilters}
+                onClear={clearFilters}
+                hasPendingChanges={hasPendingFilterChanges}
+                splitView={chartTeamView}
+                onSplitViewChange={setChartTeamView}
+                activeOverlayFilters={activeOverlayFilters}
+                onOverlayFiltersChange={setActiveOverlayFilters}
+                homeTeamName={homeTeamName}
+                awayTeamName={awayTeamName}
+              />
+            </>
+          ) : null}
+        </aside>
+
+        {/* Glossary Modal */}
+        {showGlossary && createPortal(
+          <div className="glossary-backdrop" onClick={() => setShowGlossary(false)}>
+            <div className="glossary-modal" onClick={e => e.stopPropagation()}>
+              <div className="glossary-modal-header">
+                <h3>Filter Glossary</h3>
+                <button type="button" className="glossary-modal-close" onClick={() => setShowGlossary(false)}>✕</button>
+              </div>
+              <div className="glossary-modal-body">
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">How Filters Work</div>
+                  <div className="glossary-item">
+                    <span className="glossary-def">Filters narrow down the historical matches shown in the chart. Only games matching all active filters are included in the hit-rate calculation.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Season &amp; Games</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Season</span>
+                    <span className="glossary-def">Select which season's data to display. Currently only 25/26 is available.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Games</span>
+                    <span className="glossary-def">Limit the number of most-recent matches shown. Choose 10, 20, Max, or set a custom number with the stepper. The lock icon indicates a custom value is active.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Split</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Chart View</span>
+                    <span className="glossary-def">Both — shows home &amp; away in one chart. Home / Away — filters to only those venues.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Venue</span>
+                    <span className="glossary-def">Filter matches by where the team played (All, Home, or Away).</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">vs Similar Teams</span>
+                    <span className="glossary-def">Filters to opponents that are statistically similar to the upcoming opponent, based on PCA cluster analysis.</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Stats Filters</div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Momentum</span>
+                    <span className="glossary-def">Team's form score (0–10) in matches leading up to the game.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">xG / Opp xG</span>
+                    <span className="glossary-def">Expected goals for or against. Filters from 0–5.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Possession</span>
+                    <span className="glossary-def">Ball possession percentage for either the team or opponent (0–100%).</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Field Tilt</span>
+                    <span className="glossary-def">Attacking territory share, ranging 0–1. Higher values mean more territory in the opponent's half.</span>
+                  </div>
+                  <div className="glossary-item">
+                    <span className="glossary-term">Total / Team / Opp Goals</span>
+                    <span className="glossary-def">Filter by goals scored in the match (0–10).</span>
+                  </div>
+                </div>
+
+                <div className="glossary-section">
+                  <div className="glossary-section-title">Opponent Rankings</div>
+                  <div className="glossary-item">
+                    <span className="glossary-def">Filter by how the opponent ranked in the league that season for xGD, xGF, xGA, position, corners, momentum, or possession. Rank 1 = best, 20 = worst.</span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+        <div className="metrics-panel-mobile-wrap">
+          <MetricsPanel
+            betType={workspace?.workspace?.bet_type || betType}
+            metrics={workspace.metrics}
+            sampleSize={workspace.sample_size}
+            sampleSizes={workspace.sample_sizes}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
