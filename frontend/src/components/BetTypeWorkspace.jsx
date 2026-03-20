@@ -67,8 +67,8 @@ function createDefaultFilters() {
     npg_toggle: false,
     shot_xg_threshold: 0.3,
     shot_xg_min_shots: 0,
-    games_mode: isMobile ? '10' : '20',
-    games_count: isMobile ? 10 : 20,
+    games_mode: isMobile ? '12' : '20',
+    games_count: isMobile ? 12 : 20,
   }
 }
 

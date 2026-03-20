@@ -946,7 +946,7 @@ const TeamBarChart = memo(function TeamBarChart({
   const isWbh = normalizedBetType === BET_TYPE_WIN_BOTH_HALVES
 
   const isMobileChart = containerWidth > 0 && containerWidth <= MOBILE_CHART_BREAKPOINT
-  const displayData = isMobileChart ? data.slice(-10) : data.slice(-20)
+  const displayData = data
 
   const { rawSeriesMax, referenceLineValue, yAxisTicks, yAxisMax, hitRate, hitRateToneClass, graphAvg, seasonAvg, lineSummaryLabel, hasLineSummaryLabel } = useMemo(() => {
     const _rawSeriesMax = readSeriesMax(displayData)
