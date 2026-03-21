@@ -149,24 +149,39 @@ class AnalyticsStore(AnalyticsStoreContract):
         return row
     
     def _filter_dataframe(
-        self, 
-        df: pd.DataFrame, 
-        filters: List[FilterSpec], 
+        self,
+        df: pd.DataFrame,
+        filters: List[FilterSpec],
         request: EvidenceRequest
     ) -> pd.DataFrame:
-        """Apply all filters to the dataframe, delegating by filter kind."""
+        """Apply all filters to the dataframe, delegating by filter kind.
+
+        The DataFrame is sorted by match_id ascending first so that
+        tail(N) always returns the N most recent games.  last_n_games
+        is applied last so column/context filters run first.
+        """
         if not filters:
             return df.copy()
 
+        # Sort ascending by match_id so tail() returns the most recent games
         filtered_df = df.copy()
-        
-        # Group filters by kind and apply
+        if "match_id" in filtered_df.columns:
+            filtered_df = filtered_df.sort_values("match_id", ascending=True, ignore_index=True)
+
+        # Apply all filters except last_n_games first
         for f in filters:
+            if f.kind == "context" and f.key == "last_n_games":
+                continue  # deferred to the end
             if f.kind == "column":
                 filtered_df = self._apply_column_filter(filtered_df, f)
             elif f.kind == "context":
                 filtered_df = self._apply_context_filter(filtered_df, f, request)
-        
+
+        # Apply last_n_games last to always return the last N matches
+        for f in filters:
+            if f.kind == "context" and f.key == "last_n_games":
+                filtered_df = filtered_df.tail(f.value)
+
         return filtered_df
     
     def _apply_column_filter(self, df: pd.DataFrame, spec: FilterSpec) -> pd.DataFrame:
@@ -345,7 +360,9 @@ class AnalyticsStore(AnalyticsStoreContract):
         if spec.key == 'head_to_head':
             return self._apply_head_to_head_filter(df, request)
         elif spec.key == 'last_n_games':
-            return df.tail(spec.value)
+            # Sort ascending so tail() returns the most recent games
+            sorted_df = df.sort_values("match_id", ascending=True) if "match_id" in df.columns else df
+            return sorted_df.tail(spec.value)
 
         return df.copy()
 
@@ -376,9 +393,9 @@ class AnalyticsStore(AnalyticsStoreContract):
         ]
     
     def apply_filters(
-            self, 
-            df: pd.DataFrame, 
-            filters: List[FilterSpec], 
+            self,
+            df: pd.DataFrame,
+            filters: List[FilterSpec],
             request: EvidenceRequest
         ) -> pd.DataFrame:
 
@@ -391,13 +408,22 @@ class AnalyticsStore(AnalyticsStoreContract):
 
         filtered_df = df.copy()
 
+        last_n = [f for f in context_filters if f.key == "last_n_games"]
+        other_context = [f for f in context_filters if f.key != "last_n_games"]
+
         # Apply column filters first
         if column_filters:
             filtered_df = self._apply_column_filters(filtered_df, column_filters)
 
-        # Apply context filters 
-        if context_filters:
-            filtered_df = self._apply_context_filters(filtered_df, context_filters, request)
+        # Apply non-last_n context filters (head_to_head, etc.)
+        if other_context:
+            filtered_df = self._apply_context_filters(filtered_df, other_context, request)
+
+        # Sort ascending so tail() returns the most recent games, then apply last_n_games
+        if last_n:
+            if "match_id" in filtered_df.columns:
+                filtered_df = filtered_df.sort_values("match_id", ascending=True, ignore_index=True)
+            filtered_df = filtered_df.tail(last_n[0].value)
 
         return filtered_df
             
@@ -451,8 +477,10 @@ class AnalyticsStore(AnalyticsStoreContract):
                 filtered_df = self._apply_head_to_head_filter(filtered_df, request)
 
             if spec.key == "last_n_games":
-                length = spec.value
-                filtered_df = filtered_df.tail(length)
+                # Sort ascending so tail() returns the most recent games
+                if "match_id" in filtered_df.columns:
+                    filtered_df = filtered_df.sort_values("match_id", ascending=True, ignore_index=True)
+                filtered_df = filtered_df.tail(spec.value)
 
         return filtered_df
 
