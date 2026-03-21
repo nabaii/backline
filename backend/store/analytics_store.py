@@ -103,6 +103,10 @@ class AnalyticsStore(AnalyticsStoreContract):
             "home_team_id": ma.home_team_id,  # Always preserve actual home team
             "away_team_id": ma.away_team_id,  # Always preserve actual away team
         }
+
+        # Include match_datetime for chronological sorting
+        if "match_datetime" in ma.available_features:
+            row["match_datetime"] = ma.get_feature("match_datetime")
         
         # Add goals_scored if needed
         # Check both required_columns and extra_features
@@ -156,16 +160,24 @@ class AnalyticsStore(AnalyticsStoreContract):
     ) -> pd.DataFrame:
         """Apply all filters to the dataframe, delegating by filter kind.
 
-        The DataFrame is sorted by match_id ascending first so that
-        tail(N) always returns the N most recent games.  last_n_games
-        is applied last so column/context filters run first.
+        The DataFrame is sorted by match_datetime ascending (falling back
+        to match_id) so that tail(N) always returns the N most recent
+        games chronologically.  last_n_games is applied last so
+        column/context filters run first.
         """
         if not filters:
             return df.copy()
 
-        # Sort ascending by match_id so tail() returns the most recent games
+        # Sort ascending by match_datetime (falling back to match_id) so tail() returns the most recent games
         filtered_df = df.copy()
-        if "match_id" in filtered_df.columns:
+        if "match_datetime" in filtered_df.columns:
+            filtered_df["_sort_dt"] = pd.to_datetime(filtered_df["match_datetime"], utc=True, errors="coerce")
+            filtered_df = filtered_df.sort_values(
+                by=["_sort_dt", "match_id"] if "match_id" in filtered_df.columns else ["_sort_dt"],
+                ascending=True, na_position="first", ignore_index=True,
+            )
+            filtered_df = filtered_df.drop(columns=["_sort_dt"])
+        elif "match_id" in filtered_df.columns:
             filtered_df = filtered_df.sort_values("match_id", ascending=True, ignore_index=True)
 
         # Apply all filters except last_n_games first
@@ -360,8 +372,15 @@ class AnalyticsStore(AnalyticsStoreContract):
         if spec.key == 'head_to_head':
             return self._apply_head_to_head_filter(df, request)
         elif spec.key == 'last_n_games':
-            # Sort ascending so tail() returns the most recent games
-            sorted_df = df.sort_values("match_id", ascending=True) if "match_id" in df.columns else df
+            # Sort ascending by match_datetime so tail() returns the most recent games
+            sorted_df = df.copy()
+            if "match_datetime" in sorted_df.columns:
+                sorted_df["_sort_dt"] = pd.to_datetime(sorted_df["match_datetime"], utc=True, errors="coerce")
+                sort_cols = ["_sort_dt", "match_id"] if "match_id" in sorted_df.columns else ["_sort_dt"]
+                sorted_df = sorted_df.sort_values(sort_cols, ascending=True, na_position="first")
+                sorted_df = sorted_df.drop(columns=["_sort_dt"])
+            elif "match_id" in sorted_df.columns:
+                sorted_df = sorted_df.sort_values("match_id", ascending=True)
             return sorted_df.tail(spec.value)
 
         return df.copy()
@@ -419,9 +438,14 @@ class AnalyticsStore(AnalyticsStoreContract):
         if other_context:
             filtered_df = self._apply_context_filters(filtered_df, other_context, request)
 
-        # Sort ascending so tail() returns the most recent games, then apply last_n_games
+        # Sort ascending by match_datetime so tail() returns the most recent games, then apply last_n_games
         if last_n:
-            if "match_id" in filtered_df.columns:
+            if "match_datetime" in filtered_df.columns:
+                filtered_df["_sort_dt"] = pd.to_datetime(filtered_df["match_datetime"], utc=True, errors="coerce")
+                sort_cols = ["_sort_dt", "match_id"] if "match_id" in filtered_df.columns else ["_sort_dt"]
+                filtered_df = filtered_df.sort_values(sort_cols, ascending=True, na_position="first", ignore_index=True)
+                filtered_df = filtered_df.drop(columns=["_sort_dt"])
+            elif "match_id" in filtered_df.columns:
                 filtered_df = filtered_df.sort_values("match_id", ascending=True, ignore_index=True)
             filtered_df = filtered_df.tail(last_n[0].value)
 

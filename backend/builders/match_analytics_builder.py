@@ -193,6 +193,14 @@ class MatchAnalyticsBuilder:
             "away_h2_goals": _safe_int(match_df["away_h2_goals"].iloc[0]) if "away_h2_goals" in match_df.columns else 0,
         }
 
+        # Preserve match_datetime for chronological sorting in filters
+        if "match_datetime" in match_df.columns:
+            raw_dt = match_df["match_datetime"].iloc[0]
+            try:
+                available_features["match_datetime"] = pd.Timestamp(raw_dt)
+            except Exception:
+                pass
+
         self.feature_keys.update(available_features.keys())
 
         return MatchAnalytics(
