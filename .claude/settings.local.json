@@ -69,7 +69,8 @@
       "Bash(powershell -Command \"iwr https://fly.io/install.ps1 -useb | iex\")",
       "Bash(vercel login:*)",
       "Bash(\"$HOME/.fly/bin/flyctl\" auth:*)",
-      "Bash(\"$HOME/.fly/bin/flyctl\" apps:*)"
+      "Bash(\"$HOME/.fly/bin/flyctl\" apps:*)",
+      "Bash(python -c \"from backend.db import get_db; db = get_db\\(\\); print\\(''Connected!'' if db is not None else ''No MONGODB_URI set''\\)\")"
     ]
   }
 }

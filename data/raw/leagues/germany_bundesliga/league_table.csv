@@ -1,9 +1,9 @@
 rank,team,played,won,drawn,lost,goals_for,goals_against,points,goal_difference,average_corners,average_possession,expected_goals_for,expected_goals_against,momentum,expected_goal_difference
 1,fc_bayern_münchen,26,21,4,1,93,25,67,68,6.0,66.27,76.04,29.74,4.88,46.3
 2,borussia_dortmund,26,17,7,2,55,26,58,29,5.5,53.35,47.82,30.93,5.63,16.9
-3,tsg_hoffenheim,26,15,5,6,54,34,50,20,5.73,54.73,44.18,39.81,5.31,4.37
+3,rb_leipzig,27,15,5,7,53,35,50,18,5.37,53.52,53.88,39.75,4.09,14.13
 4,vfb_stuttgart,26,15,5,6,51,34,50,17,5.38,58.42,43.84,38.05,4.53,5.79
-5,rb_leipzig,26,14,5,7,48,35,47,13,5.54,53.65,51.63,38.93,4.24,12.7
+5,tsg_hoffenheim,27,15,5,7,54,39,50,15,5.63,54.56,44.99,42.06,5.48,2.94
 6,bayer_04_leverkusen,26,13,6,7,49,33,45,16,5.04,59.27,45.78,32.59,4.94,13.19
 7,eintracht_frankfurt,26,10,8,8,49,49,38,0,4.35,54.12,34.14,35.75,3.38,-1.61
 8,sc_freiburg,26,9,7,10,37,43,34,-6,4.54,48.46,39.91,34.47,5.76,5.44

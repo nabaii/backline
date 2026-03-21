@@ -300,7 +300,7 @@ gameweek,kickoff_time,home_team,away_team,home_team_score,away_team_score,finish
 30,2026-03-15T14:00:00Z,Nott'm Forest,Fulham,0,0,True,298,england_premier_league,16,10
 30,2026-03-15T16:30:00Z,Liverpool,Spurs,1,1,True,296,england_premier_league,12,18
 30,2026-03-16T20:00:00Z,Brentford,Wolves,2,2,True,292,england_premier_league,5,20
-31,2026-03-20T20:00:00Z,Bournemouth,Man Utd,,,False,302,england_premier_league,4,14
+31,2026-03-20T20:00:00Z,Bournemouth,Man Utd,2,2,True,302,england_premier_league,4,14
 31,2026-03-21T12:30:00Z,Brighton,Liverpool,,,False,303,england_premier_league,6,12
 31,2026-03-21T15:00:00Z,Fulham,Burnley,,,False,305,england_premier_league,10,3
 31,2026-03-21T17:30:00Z,Everton,Chelsea,,,False,304,england_premier_league,9,7
@@ -312,20 +312,20 @@ gameweek,kickoff_time,home_team,away_team,home_team_score,away_team_score,finish
 32,2026-04-11T11:30:00Z,Arsenal,Bournemouth,,,False,311,england_premier_league,1,4
 32,2026-04-11T14:00:00Z,Brentford,Everton,,,False,312,england_premier_league,5,9
 32,2026-04-11T14:00:00Z,Burnley,Brighton,,,False,313,england_premier_league,3,6
-32,2026-04-11T14:00:00Z,Crystal Palace,Newcastle,,,False,315,england_premier_league,8,15
-32,2026-04-11T14:00:00Z,Nott'm Forest,Aston Villa,,,False,318,england_premier_league,16,2
 32,2026-04-11T16:30:00Z,Liverpool,Fulham,,,False,316,england_premier_league,12,10
+32,2026-04-12T13:00:00Z,Crystal Palace,Newcastle,,,False,315,england_premier_league,8,15
+32,2026-04-12T13:00:00Z,Nott'm Forest,Aston Villa,,,False,318,england_premier_league,16,2
 32,2026-04-12T13:00:00Z,Sunderland,Spurs,,,False,319,england_premier_league,17,18
 32,2026-04-12T15:30:00Z,Chelsea,Man City,,,False,314,england_premier_league,7,13
 32,2026-04-13T19:00:00Z,Man Utd,Leeds,,,False,317,england_premier_league,14,11
 33,2026-04-18T11:30:00Z,Brentford,Fulham,,,False,322,england_premier_league,5,10
-33,2026-04-18T14:00:00Z,Aston Villa,Sunderland,,,False,321,england_premier_league,2,17
 33,2026-04-18T14:00:00Z,Leeds,Wolves,,,False,326,england_premier_league,11,20
 33,2026-04-18T14:00:00Z,Newcastle,Bournemouth,,,False,328,england_premier_league,15,4
-33,2026-04-18T14:00:00Z,Nott'm Forest,Burnley,,,False,329,england_premier_league,16,3
 33,2026-04-18T16:30:00Z,Spurs,Brighton,,,False,330,england_premier_league,18,6
 33,2026-04-18T19:00:00Z,Chelsea,Man Utd,,,False,323,england_premier_league,7,14
+33,2026-04-19T13:00:00Z,Aston Villa,Sunderland,,,False,321,england_premier_league,2,17
 33,2026-04-19T13:00:00Z,Everton,Liverpool,,,False,325,england_premier_league,9,12
+33,2026-04-19T13:00:00Z,Nott'm Forest,Burnley,,,False,329,england_premier_league,16,3
 33,2026-04-19T15:30:00Z,Man City,Arsenal,,,False,327,england_premier_league,13,1
 33,2026-04-20T19:00:00Z,Crystal Palace,West Ham,,,False,324,england_premier_league,8,19
 34,2026-04-24T19:00:00Z,Sunderland,Nott'm Forest,,,False,338,england_premier_league,17,16
