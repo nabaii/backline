@@ -329,6 +329,7 @@ export default function BetTypeWorkspace({
   const [draftCornersLine, setDraftCornersLine] = useState(DEFAULT_CORNERS_LINE)
   const [appliedCornersLine, setAppliedCornersLine] = useState(DEFAULT_CORNERS_LINE)
   const [chartTeamView, setChartTeamView] = useState(DEFAULT_CHART_TEAM_VIEW)
+  const userSetChartViewRef = useRef(false)
   const [isFiltersOpen, setIsFiltersOpen] = useState(false)
   const [showGlossary, setShowGlossary] = useState(false)
   const [activeOverlayFilters, setActiveOverlayFilters] = useState(() => new Set())
@@ -508,11 +509,18 @@ export default function BetTypeWorkspace({
     setDraftFilters(defaults)
     setAppliedFilters(defaults)
     setChartTeamView(defaultTeamViewForBetType(betType))
+    userSetChartViewRef.current = false
     seasonMatchesRef.current = {}
   }, [matchId])
 
   useEffect(() => {
-    setChartTeamView(defaultTeamViewForBetType(betType))
+    const forced = defaultTeamViewForBetType(betType)
+    if (forced !== DEFAULT_CHART_TEAM_VIEW) {
+      // Bet types like home_ou/away_ou force a specific perspective
+      setChartTeamView(forced)
+    } else if (!userSetChartViewRef.current) {
+      setChartTeamView(DEFAULT_CHART_TEAM_VIEW)
+    }
   }, [betType])
 
   if (error) {
@@ -606,7 +614,7 @@ export default function BetTypeWorkspace({
                 onClear={clearFilters}
                 hasPendingChanges={hasPendingFilterChanges}
                 splitView={chartTeamView}
-                onSplitViewChange={setChartTeamView}
+                onSplitViewChange={(view) => { userSetChartViewRef.current = true; setChartTeamView(view) }}
                 activeOverlayFilters={activeOverlayFilters}
                 onOverlayFiltersChange={setActiveOverlayFilters}
                 homeTeamName={homeTeamName}

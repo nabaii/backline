@@ -11,19 +11,23 @@ Collections created:
 
 from __future__ import annotations
 
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
 import json
 import os
 import sys
 from pathlib import Path
 
-import certifi
 import pandas as pd
-from pymongo import MongoClient
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from dotenv import load_dotenv
+
+from backend.db import create_client, format_connection_error
+
+load_dotenv(PROJECT_ROOT / ".env", override=True)
+
 DATA_DIR = PROJECT_ROOT / "data" / "raw"
 LEAGUES_DIR = DATA_DIR / "leagues"
 CORNER_OVERRIDES_PATH = DATA_DIR / "corner_overrides.csv"
@@ -44,7 +48,17 @@ def migrate():
     if not uri:
         raise ValueError("MONGODB_URI environment variable is not set. Cannot sync to MongoDB.")
 
-    client = MongoClient(uri, tlsCAFile=certifi.where())
+    client = None
+    try:
+        client = create_client(uri, serverSelectionTimeoutMS=10000)
+        if client is None:
+            raise ValueError("MONGODB_URI environment variable is not set. Cannot sync to MongoDB.")
+        client.admin.command("ping")
+    except Exception as exc:
+        if client is not None:
+            client.close()
+        raise RuntimeError(format_connection_error(exc, uri=uri)) from exc
+
     db = client.get_default_database("backline")
 
     # ── Season matches ──

@@ -745,6 +745,11 @@ def main():
         default=None,
         help="Optional cap on enriched matches per league (for partial backfills/testing).",
     )
+    parser.add_argument(
+        "--skip-mongo-sync",
+        action="store_true",
+        help="Skip MongoDB Atlas sync and only refresh local CSV/cache files.",
+    )
     args = parser.parse_args()
 
     leagues = [args.league] if args.league else DEFAULT_ALL_LEAGUES
@@ -781,13 +786,23 @@ def main():
     print("=" * 60)
 
 
-    print("\n  [*] Syncing updated data to MongoDB Atlas ...")
-    try:
-        from scripts.migrate_to_mongodb import migrate
-        migrate()
-        print("  [OK] MongoDB sync complete.")
-    except Exception as e:
-        print(f"  [!!] MongoDB sync failed: {e}")
+    skip_mongo_sync = args.skip_mongo_sync or os.environ.get("BACKLINE_SKIP_MONGO_SYNC", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if skip_mongo_sync:
+        print("\n  [*] Skipping MongoDB Atlas sync.")
+    else:
+        print("\n  [*] Syncing updated data to MongoDB Atlas ...")
+        try:
+            from scripts.migrate_to_mongodb import migrate
+
+            migrate()
+            print("  [OK] MongoDB sync complete.")
+        except Exception as e:
+            print(f"  [!!] MongoDB sync failed:\n{e}")
 
 if __name__ == "__main__":
     main()
